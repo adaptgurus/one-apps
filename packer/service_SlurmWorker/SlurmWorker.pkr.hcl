@@ -97,7 +97,10 @@ build {
     destination = "/etc/one-appliance/service"
   }
   provisioner "file" {
-    sources     = ["appliances/SlurmWorker"]
+    sources = [
+      "appliances/OneSlurm/common",
+      "appliances/OneSlurm/worker",
+    ]
     destination = "/etc/one-appliance/service.d/"
   }
 

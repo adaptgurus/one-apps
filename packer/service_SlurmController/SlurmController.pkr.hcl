@@ -89,7 +89,10 @@ build {
     destination = "/etc/one-appliance/service"
   }
   provisioner "file" {
-    sources     = ["appliances/SlurmController"]
+    sources = [
+      "appliances/OneSlurm/common",
+      "appliances/OneSlurm/controller",
+    ]
     destination = "/etc/one-appliance/service.d/"
   }
 
