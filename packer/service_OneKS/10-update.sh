@@ -5,7 +5,7 @@
 exec 1>&2
 set -eux -o pipefail
 
-apk --no-cache add bash podman
+apk --no-cache add bash podman iptables ip6tables
 
 rc-update add podman boot
 rc-service podman start

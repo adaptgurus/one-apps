@@ -41,9 +41,9 @@ module HAProxy
             frontend lb<%= lb_idx %>_<%= port %>
                 mode tcp
                 bind <%= ip %>:<%= port %>
-                default_backend lb<%= lb_idx %>_<%= port %>
+                default_backend lb<%= lb_idx %>_<%= port %>_backend
 
-            backend lb<%= lb_idx %>_<%= port %>
+            backend lb<%= lb_idx %>_<%= port %>_backend
                 mode tcp
                 balance roundrobin
                 option tcp-check
