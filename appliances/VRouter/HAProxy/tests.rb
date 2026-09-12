@@ -107,9 +107,9 @@ RSpec.describe self do
             frontend lb0_1234
                 mode tcp
                 bind 10.2.10.69:1234
-                default_backend lb0_1234
+                default_backend lb0_1234_backend
 
-            backend lb0_1234
+            backend lb0_1234_backend
                 mode tcp
                 balance roundrobin
                 option tcp-check
@@ -119,9 +119,9 @@ RSpec.describe self do
             frontend lb1_4321
                 mode tcp
                 bind 10.2.10.69:4321
-                default_backend lb1_4321
+                default_backend lb1_4321_backend
 
-            backend lb1_4321
+            backend lb1_4321_backend
                 mode tcp
                 balance roundrobin
                 option tcp-check
@@ -246,9 +246,9 @@ RSpec.describe self do
             frontend lb0_6969
                 mode tcp
                 bind 10.2.11.86:6969
-                default_backend lb0_6969
+                default_backend lb0_6969_backend
 
-            backend lb0_6969
+            backend lb0_6969_backend
                 mode tcp
                 balance roundrobin
                 option tcp-check
@@ -259,9 +259,9 @@ RSpec.describe self do
             frontend lb1_8686
                 mode tcp
                 bind 10.2.11.86:8686
-                default_backend lb1_8686
+                default_backend lb1_8686_backend
 
-            backend lb1_8686
+            backend lb1_8686_backend
                 mode tcp
                 balance roundrobin
                 option tcp-check
@@ -410,9 +410,9 @@ RSpec.describe self do
             frontend lb0_5432
                 mode tcp
                 bind 10.2.11.86:5432
-                default_backend lb0_5432
+                default_backend lb0_5432_backend
 
-            backend lb0_5432
+            backend lb0_5432_backend
                 mode tcp
                 balance roundrobin
                 option tcp-check
@@ -422,9 +422,9 @@ RSpec.describe self do
             frontend lb1_4321
                 mode tcp
                 bind 10.2.11.86:4321
-                default_backend lb1_4321
+                default_backend lb1_4321_backend
 
-            backend lb1_4321
+            backend lb1_4321_backend
                 mode tcp
                 balance roundrobin
                 option tcp-check
@@ -516,9 +516,9 @@ RSpec.describe self do
           frontend lb0_6969
               mode tcp
               bind 10.2.11.86:6969
-              default_backend lb0_6969
+              default_backend lb0_6969_backend
 
-          backend lb0_6969
+          backend lb0_6969_backend
               mode tcp
               balance roundrobin
               option tcp-check
@@ -534,4 +534,26 @@ RSpec.describe self do
           expect(result.strip).to eq output.strip
       end
   end
+end
+
+RSpec.describe self do
+    it 'generates independently named TCP frontends and backends accepted by HAProxy' do
+        load './main.rb'
+        Service::HAProxy.instance_variable_set(:@interfaces, {})
+        Service::HAProxy.instance_variable_set(:@mgmt, [])
+        Service::HAProxy.instance_variable_set(:@allowed, ['127.0.0.1'])
+        Dir.mktmpdir do |dir|
+            endpoints = [6443, 9345].each_with_index.to_h do |port, index|
+                [[index, '127.0.0.1', port], {node: {host: '127.0.0.2', port: port}}]
+            end
+            Service::HAProxy.render_servers_cfg({by_endpoint: endpoints}, basedir: dir)
+            path = File.join(dir, 'servers.cfg')
+            text = File.read(path)
+            frontends = text.scan(/^frontend (\S+)/).flatten
+            backends = text.scan(/^backend (\S+)/).flatten
+            expect(frontends & backends).to be_empty
+            expect(text.scan(/default_backend (\S+)/).flatten).to eq(backends)
+            expect(system('haproxy', '-c', '-f', path)).to be true
+        end
+    end
 end
