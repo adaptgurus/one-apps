@@ -1,0 +1,32 @@
+name: LayerSentry OneKS Day2
+
+on:
+  push:
+    branches:
+      - layersentry/p1-rke2-day2-production-20260913
+  pull_request:
+    branches:
+      - layersentry/p1-rke2-provisioning
+    paths:
+      - 'appliances/OneKS/**'
+      - '.github/workflows/layersentry-oneks-day2.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  seed:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+      - run: gem install rspec
+      - name: Syntax
+        run: |
+          ruby -c appliances/OneKS/config.rb
+          ruby -c appliances/OneKS/main.rb
+          ruby -c appliances/OneKS/tests.rb
+      - name: OneKS appliance regression tests
+        run: ruby appliances/OneKS/tests.rb
