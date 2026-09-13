@@ -23,6 +23,10 @@ jobs:
         with:
           ruby-version: '3.4'
       - run: gem install rspec
+      - name: Create OpenNebula context fixture
+        run: |
+          sudo install -d -m 0755 /run/one-context
+          sudo install -m 0644 /dev/null /run/one-context/one_env
       - name: Syntax
         run: |
           ruby -c appliances/OneKS/config.rb
