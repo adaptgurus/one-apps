@@ -28,5 +28,8 @@ jobs:
           ruby -c appliances/OneKS/config.rb
           ruby -c appliances/OneKS/main.rb
           ruby -c appliances/OneKS/tests.rb
+          ruby -c appliances/OneKS/heartbeat_tests.rb
       - name: OneKS appliance regression tests
-        run: ruby appliances/OneKS/tests.rb
+        run: |
+          ruby appliances/OneKS/tests.rb
+          ruby appliances/OneKS/heartbeat_tests.rb
