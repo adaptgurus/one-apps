@@ -1,0 +1,33 @@
+name: Temporary RKE2 install.sh hash
+
+on:
+  push:
+    branches:
+      - layersentry/rke2-install-hash-20260914
+
+permissions:
+  contents: write
+
+jobs:
+  hash:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Hash pinned upstream installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          url='https://raw.githubusercontent.com/rancher/rke2/v1.36.4%2Brke2r1/install.sh'
+          curl -fsSL --retry 3 "$url" -o /tmp/install.sh
+          sha256sum /tmp/install.sh | awk '{print $1}' > packer/rocky/rke2-install-sha256.txt
+          test "$(wc -c < packer/rocky/rke2-install-sha256.txt)" -eq 65
+      - name: Publish hash to this temporary branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add packer/rocky/rke2-install-sha256.txt
+          git commit -m 'chore: record pinned RKE2 installer sha256'
+          git push origin HEAD:layersentry/rke2-install-hash-20260914
