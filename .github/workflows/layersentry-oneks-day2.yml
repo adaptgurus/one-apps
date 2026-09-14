@@ -9,6 +9,12 @@ on:
       - layersentry/p1-rke2-provisioning
     paths:
       - 'appliances/OneKS/**'
+      - 'packer/rocky/**'
+      - 'packer/layersentry-poc/**'
+      - 'packer/build.sh'
+      - 'packer/make-cloud-init-iso.sh'
+      - 'packer/build-common.pkr.hcl'
+      - 'packer/vars-common.pkr.hcl'
       - '.github/workflows/layersentry-oneks-day2.yml'
 
 permissions:
@@ -33,7 +39,13 @@ jobs:
           ruby -c appliances/OneKS/main.rb
           ruby -c appliances/OneKS/tests.rb
           ruby -c appliances/OneKS/heartbeat_tests.rb
+          bash -n packer/make-cloud-init-iso.sh
+          bash -n packer/rocky/90-custom-scripts/95-layersentry-rke2-airgap.sh
+          bash -n packer/layersentry-poc/build-rocky-rke2-airgap.sh
+          bash -n packer/layersentry-poc/test-rocky-rke2-airgap.sh
       - name: OneKS appliance regression tests
         run: |
           ruby appliances/OneKS/tests.rb
           ruby appliances/OneKS/heartbeat_tests.rb
+      - name: Rocky RKE2 air-gap source checks
+        run: packer/layersentry-poc/test-rocky-rke2-airgap.sh
