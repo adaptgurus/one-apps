@@ -25,6 +25,8 @@ packer build -force \
     -var "output_dir=${OUTPUT_DIR}" \
     -var "headless=${PACKER_HEADLESS}" \
     -var "arch=${ARCH}" \
+    -var "layersentry_rke2_airgap=${LAYERSENTRY_RKE2_AIRGAP:-false}" \
+    -var "qemu_binary_override=${PACKER_QEMU_BINARY_OVERRIDE:-}" \
     "$INPUT_DIR"                       # loads all *.pkr.hcl from dir
 
 # delete potential temporary cloud-init files

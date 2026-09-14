@@ -1,0 +1,51 @@
+name: LayerSentry OneKS Day2
+
+on:
+  push:
+    branches:
+      - layersentry/p1-rke2-day2-production-20260913
+  pull_request:
+    branches:
+      - layersentry/p1-rke2-provisioning
+    paths:
+      - 'appliances/OneKS/**'
+      - 'packer/rocky/**'
+      - 'packer/layersentry-poc/**'
+      - 'packer/build.sh'
+      - 'packer/make-cloud-init-iso.sh'
+      - 'packer/build-common.pkr.hcl'
+      - 'packer/vars-common.pkr.hcl'
+      - '.github/workflows/layersentry-oneks-day2.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  seed:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+      - run: gem install rspec
+      - name: Create OpenNebula context fixture
+        run: |
+          sudo install -d -m 0755 /run/one-context
+          sudo install -m 0644 /dev/null /run/one-context/one_env
+      - name: Syntax
+        run: |
+          ruby -c appliances/OneKS/config.rb
+          ruby -c appliances/OneKS/main.rb
+          ruby -c appliances/OneKS/tests.rb
+          ruby -c appliances/OneKS/heartbeat_tests.rb
+          bash -n packer/make-cloud-init-iso.sh
+          bash -n packer/rocky/90-custom-scripts/95-layersentry-rke2-airgap.sh
+          bash -n packer/layersentry-poc/build-rocky-rke2-airgap.sh
+          bash -n packer/layersentry-poc/test-rocky-rke2-airgap.sh
+      - name: OneKS appliance regression tests
+        run: |
+          ruby appliances/OneKS/tests.rb
+          ruby appliances/OneKS/heartbeat_tests.rb
+      - name: Rocky RKE2 air-gap source checks
+        run: packer/layersentry-poc/test-rocky-rke2-airgap.sh
