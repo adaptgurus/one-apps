@@ -1,0 +1,33 @@
+name: LayerSentry RKE2 image candidate
+
+on:
+  push:
+    branches:
+      - layersentry/p1-rke2-day2-image-candidate-20260914
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: hashicorp/setup-packer@v3
+      - name: Validate Rocky image extension
+        shell: bash
+        run: |
+          set -euo pipefail
+          script=packer/rocky/90-custom-scripts/90-layersentry-rke2-airgap.sh.9.8
+          bash -n "$script"
+          shellcheck "$script"
+          packer fmt -check packer/rocky/variables.pkr.hcl
+          grep -Fq 'v1.36.4+rke2r1' "$script"
+          grep -Fq '42983c86d1da64a92061d83afb57630cedd69241989f1b0673f3db6c3d92ee6b' "$script"
+          grep -Fq '7bcbd3167d6947e1d79cdf722acdc740b28021fefb50dd5b974a1980776d4079' "$script"
+          grep -Fq '8e12805c4bda79bec2fd20c89f705af3cb2ed11ea8854dc4937fca41b124b57a' "$script"
+          grep -Fq '8988a2eff587dd88b8eab86fe719703e9541a1f08d22771a94cbec446a13db86' "$script"
+          grep -Fq '4359b651bfdec8f3bcc01b351b33a55ff21f06b18a767366db6f3800d5750871' "$script"
+          grep -Fq '/usr/local/libexec/oneks/worker-disk' "$script"
+          grep -Fq 'virt_qemu_ga_unconfined_exec_t' "$script"
+          grep -Fq 'systemctl enable qemu-guest-agent.service' "$script"
+          ! grep -Fq 'get.rke2.io' "$script"
+          grep -Fq 'Rocky-9-GenericCloud-Base-9.8-20260525.0.x86_64.qcow2' packer/rocky/variables.pkr.hcl
