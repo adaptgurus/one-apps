@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+RKE2_VERSION='v1.36.4+rke2r1'
+RKE2_RELEASE='v1.36.4%2Brke2r1'
+RELEASE_BASE="https://github.com/rancher/rke2/releases/download/${RKE2_RELEASE}"
+
+INSTALL_SH_SHA256='42983c86d1da64a92061d83afb57630cedd69241989f1b0673f3db6c3d92ee6b'
+RKE2_TARBALL_SHA256='7bcbd3167d6947e1d79cdf722acdc740b28021fefb50dd5b974a1980776d4079'
+RKE2_SUMS_SHA256='8e12805c4bda79bec2fd20c89f705af3cb2ed11ea8854dc4937fca41b124b57a'
+RKE2_CORE_SHA256='8988a2eff587dd88b8eab86fe719703e9541a1f08d22771a94cbec446a13db86'
+RKE2_CANAL_SHA256='4359b651bfdec8f3bcc01b351b33a55ff21f06b18a767366db6f3800d5750871'
+
+ARTIFACT_DIR='/opt/rke2-artifacts'
+IMAGE_DIR='/var/lib/rancher/rke2/agent/images'
+DISK_HELPER='/usr/local/libexec/oneks/worker-disk'
+
+if [[ "$(uname -m)" != 'x86_64' ]]; then
+    echo 'LayerSentry RKE2 image is pinned to x86_64' >&2
+    exit 1
+fi
+
+install -d -m 0755 "${ARTIFACT_DIR}" "${IMAGE_DIR}" /usr/local/libexec/oneks
+
+dnf install -y \
+    ca-certificates \
+    curl \
+    e2fsprogs \
+    policycoreutils-python-utils \
+    qemu-guest-agent \
+    xfsprogs
+
+fetch_verified() {
+    local url="$1"
+    local sha256="$2"
+    local target="$3"
+    local mode="$4"
+    local tmp
+
+    tmp="$(mktemp "${target}.part.XXXXXX")"
+    if ! curl -fL --retry 3 --retry-delay 2 --connect-timeout 30 --max-time 1800 \
+        "${url}" -o "${tmp}"; then
+        rm -f "${tmp}"
+        return 1
+    fi
+    printf '%s  %s\n' "${sha256}" "${tmp}" | sha256sum -c -
+    install -m "${mode}" "${tmp}" "${target}"
+    rm -f "${tmp}"
+}
+
+fetch_verified \
+    "https://raw.githubusercontent.com/rancher/rke2/${RKE2_RELEASE}/install.sh" \
+    "${INSTALL_SH_SHA256}" /opt/install.sh 0755
+fetch_verified \
+    "${RELEASE_BASE}/rke2.linux-amd64.tar.gz" \
+    "${RKE2_TARBALL_SHA256}" "${ARTIFACT_DIR}/rke2.linux-amd64.tar.gz" 0644
+fetch_verified \
+    "${RELEASE_BASE}/sha256sum-amd64.txt" \
+    "${RKE2_SUMS_SHA256}" "${ARTIFACT_DIR}/sha256sum-amd64.txt" 0644
+fetch_verified \
+    "${RELEASE_BASE}/rke2-images-core.linux-amd64.tar.zst" \
+    "${RKE2_CORE_SHA256}" "${IMAGE_DIR}/rke2-images-core.linux-amd64.tar.zst" 0644
+fetch_verified \
+    "${RELEASE_BASE}/rke2-images-canal.linux-amd64.tar.zst" \
+    "${RKE2_CANAL_SHA256}" "${IMAGE_DIR}/rke2-images-canal.linux-amd64.tar.zst" 0644
+
+# Fail closed if any baked artifact changes after installation.
+printf '%s  %s\n' "${INSTALL_SH_SHA256}" /opt/install.sh | sha256sum -c -
+printf '%s  %s\n' "${RKE2_TARBALL_SHA256}" "${ARTIFACT_DIR}/rke2.linux-amd64.tar.gz" | sha256sum -c -
+printf '%s  %s\n' "${RKE2_SUMS_SHA256}" "${ARTIFACT_DIR}/sha256sum-amd64.txt" | sha256sum -c -
+printf '%s  %s\n' "${RKE2_CORE_SHA256}" "${IMAGE_DIR}/rke2-images-core.linux-amd64.tar.zst" | sha256sum -c -
+printf '%s  %s\n' "${RKE2_CANAL_SHA256}" "${IMAGE_DIR}/rke2-images-canal.linux-amd64.tar.zst" | sha256sum -c -
+grep -Eq "^${RKE2_TARBALL_SHA256}[[:space:]]+rke2\.linux-amd64\.tar\.gz$" \
+    "${ARTIFACT_DIR}/sha256sum-amd64.txt"
+
+cat > "${DISK_HELPER}" <<'HELPER'
+#!/usr/bin/env bash
+set -euo pipefail
+export LC_ALL=C
+
+readonly MOUNT_BASE='/var/lib/layersentry/disks'
+
+valid_mount() {
+    local mount="$1"
+    [[ "${mount}" == '/' ]] || [[ "${mount}" =~ ^${MOUNT_BASE}/[a-z][a-z0-9-]{0,30}$ ]]
+}
+
+require_mount() {
+    local mount="$1"
+    valid_mount "${mount}" || {
+        echo "refusing unmanaged mount: ${mount}" >&2
+        exit 64
+    }
+    mountpoint -q -- "${mount}" || {
+        echo "mount is not active: ${mount}" >&2
+        exit 65
+    }
+}
+
+case "${1:-}" in
+status)
+    shift
+    (( $# > 0 )) || exit 64
+    for mount in "$@"; do
+        valid_mount "${mount}" || {
+            echo "refusing unmanaged mount: ${mount}" >&2
+            exit 64
+        }
+    done
+    exec df -Pk -- "$@"
+    ;;
+grow)
+    shift
+    (( $# == 1 )) || exit 64
+    mount="$1"
+    require_mount "${mount}"
+    source="$(findmnt -n -o SOURCE -M "${mount}")"
+    fstype="$(findmnt -n -o FSTYPE -M "${mount}")"
+    [[ -n "${source}" && -b "${source}" ]] || {
+        echo "mount source is not a block device: ${source}" >&2
+        exit 65
+    }
+    case "${fstype}" in
+    xfs)
+        exec xfs_growfs "${mount}"
+        ;;
+    ext2|ext3|ext4)
+        exec resize2fs "${source}"
+        ;;
+    *)
+        echo "unsupported filesystem: ${fstype}" >&2
+        exit 65
+        ;;
+    esac
+    ;;
+*)
+    echo 'usage: worker-disk status <mount>... | worker-disk grow <mount>' >&2
+    exit 64
+    ;;
+esac
+HELPER
+chmod 0750 "${DISK_HELPER}"
+chown root:root "${DISK_HELPER}"
+
+# qemu-ga remains confined. Only this labelled helper may transition for guest-exec.
+semanage fcontext -a -t virt_qemu_ga_unconfined_exec_t "${DISK_HELPER}" 2>/dev/null || \
+    semanage fcontext -m -t virt_qemu_ga_unconfined_exec_t "${DISK_HELPER}"
+restorecon -v "${DISK_HELPER}"
+setsebool -P virt_qemu_ga_run_unconfined on
+
+if grep -Eq '^FILTER_RPC_ARGS="--allow-rpcs=[^"]*"$' /etc/sysconfig/qemu-ga 2>/dev/null; then
+    rpc_list="$(sed -n 's/^FILTER_RPC_ARGS="--allow-rpcs=\([^"]*\)"$/\1/p' /etc/sysconfig/qemu-ga)"
+    for rpc in guest-exec guest-exec-status; do
+        case ",${rpc_list}," in
+        *",${rpc},"*) ;;
+        *) rpc_list="${rpc_list:+${rpc_list},}${rpc}" ;;
+        esac
+    done
+    sed -i "s|^FILTER_RPC_ARGS=.*|FILTER_RPC_ARGS=\"--allow-rpcs=${rpc_list}\"|" /etc/sysconfig/qemu-ga
+elif grep -Eq '^FILTER_RPC_ARGS="--block-rpcs=[^"]*"$' /etc/sysconfig/qemu-ga 2>/dev/null; then
+    rpc_list="$(sed -n 's/^FILTER_RPC_ARGS="--block-rpcs=\([^"]*\)"$/\1/p' /etc/sysconfig/qemu-ga)"
+    kept=''
+    IFS=',' read -r -a blocked <<< "${rpc_list}"
+    for rpc in "${blocked[@]}"; do
+        [[ "${rpc}" == 'guest-exec' || "${rpc}" == 'guest-exec-status' || -z "${rpc}" ]] && continue
+        kept="${kept:+${kept},}${rpc}"
+    done
+    sed -i "s|^FILTER_RPC_ARGS=.*|FILTER_RPC_ARGS=\"--block-rpcs=${kept}\"|" /etc/sysconfig/qemu-ga
+else
+    echo 'Unsupported qemu-ga RPC filter configuration; refusing to broaden guest execution' >&2
+    exit 1
+fi
+systemctl enable qemu-guest-agent.service
+
+# The VM bootstrap invokes the pinned local installer; do not install/start RKE2 here.
+printf 'LayerSentry RKE2 artifacts: %s\n' "${RKE2_VERSION}" > /opt/rke2-artifacts/VERSION
+
+dnf clean all
+rm -rf /var/cache/dnf/*
