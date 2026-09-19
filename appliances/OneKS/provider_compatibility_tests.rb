@@ -26,6 +26,49 @@ RSpec.describe Service::OneKS do
     end.to raise_error(/Unqualified OneKS provider set/)
   end
 
+  it 'reports management provider initialization failures explicitly' do
+    stub_const('ONEKS_CLUSTER_SPEC', Base64.strict_encode64("apiVersion: v1\nkind: List\nitems: []\n"))
+    reported = []
+    allow(described_class).to receive(:start_onegate_heartbeat)
+    allow(described_class).to receive(:stop_onegate_heartbeat)
+    allow(described_class).to receive(:bash).and_return('')
+    allow(described_class).to receive(:report_onegate_state) do |state, code = 'NONE'|
+      reported << [state, code]
+    end
+    allow(described_class).to receive(:initialize_providers)
+      .with(ONEKS_MGMT_KUBECONFIG_PATH)
+      .and_raise('metadata validation failed')
+
+    expect { described_class.configure }.to raise_error(SystemExit)
+    expect(reported).to include(['PROVISIONING_FAILURE', 'MGMT_PROVIDER_INIT_FAILED'])
+    expect(reported).not_to include(['PROVISIONING_FAILURE', 'PROVISIONING_EXCEPTION'])
+  end
+
+  it 'reports workload provider initialization failures explicitly' do
+    stub_const('ONEKS_CLUSTER_SPEC', Base64.strict_encode64("apiVersion: v1\nkind: List\nitems: []\n"))
+    stub_const('ONEKS_CNI_DAEMONSET', '')
+    reported = []
+    provider_calls = 0
+
+    allow(described_class).to receive(:start_onegate_heartbeat)
+    allow(described_class).to receive(:stop_onegate_heartbeat)
+    allow(described_class).to receive(:bash).and_return('')
+    allow(described_class).to receive(:begin_retry?).and_return(true)
+    allow(described_class).to receive(:report_onegate_state) do |state, code = 'NONE'|
+      reported << [state, code]
+    end
+    allow(described_class).to receive(:initialize_providers) do |_kubeconfig|
+      provider_calls += 1
+      raise 'workload provider validation failed' if provider_calls == 2
+      true
+    end
+
+    expect { described_class.configure }.to raise_error(SystemExit)
+    expect(provider_calls).to eq(2)
+    expect(reported).to include(['PIVOTING_FAILURE', 'WKLD_PROVIDER_INIT_FAILED'])
+    expect(reported).not_to include(['PIVOTING_FAILURE', 'PIVOT_EXCEPTION'])
+  end
+
   it 'rejects CAPONE metadata that clusterctl 1.11+ rejects' do
     metadata = {
       'apiVersion' => 'clusterctl.cluster.x-k8s.io/v1alpha3',
