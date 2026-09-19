@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 require 'rspec'
+require 'tmpdir'
 require_relative 'main'
 include Service
 
@@ -59,9 +60,55 @@ RSpec.describe Service::OneKS do
     expect(combined).to include(ONEKS_KIND_IMAGE)
     expect(combined).not_to include('kind create cluster', 'get kubeconfig', 'clusterctl init')
   end
-  it 'pins all three native provider versions during initialization' do
+  it 'accepts only the explicitly qualified provider contract skew' do
+    expect(described_class.validate_provider_contracts!).to be(true)
+    expect do
+      described_class.validate_provider_contracts!(
+        capi_version: '1.16.0',
+        capi_contract: 'v1beta2',
+        caprke2_contract: 'v1beta2',
+        capone_contract: 'v1beta1'
+      )
+    end.to raise_error(/CAPONE v1beta1 contract is no longer compatible/)
+    expect do
+      described_class.validate_provider_contracts!(
+        capi_version: '1.13.5',
+        capi_contract: 'v1beta2',
+        caprke2_contract: 'v1beta1',
+        capone_contract: 'v1beta1'
+      )
+    end.to raise_error(/CAPRKE2 contract must match/)
+  end
+
+  it 'builds a local CAPONE repository with clusterctl 1.11+ metadata' do
+    Dir.mktmpdir('oneks-provider-test') do |dir|
+      source = File.join(dir, 'source-components.yaml')
+      File.write(source, "apiVersion: v1\nkind: List\nitems: []\n")
+      repository = File.join(dir, 'providers')
+      stub_const('ONEKS_PROVIDER_REPOSITORY_PATH', repository)
+      stub_const('ONEKS_CAPONE_COMPONENTS_SOURCE', source)
+
+      components = described_class.prepare_capone_repository
+      metadata = File.join(File.dirname(components), 'metadata.yaml')
+
+      expect(components).to eq(
+        File.join(repository, 'infrastructure-opennebula', 'v0.1.8',
+                  'infrastructure-components.yaml')
+      )
+      expect(File.read(components)).to eq(File.read(source))
+      expect(File.read(metadata)).to include(
+        'apiVersion: clusterctl.cluster.x-k8s.io/v1alpha3',
+        'kind: Metadata',
+        'contract: v1beta1'
+      )
+    end
+  end
+
+  it 'pins all three native provider versions and the local CAPONE repository' do
     script = nil
     timeout_config = nil
+    capone_components = '/opt/oneks/providers/infrastructure-opennebula/v0.1.8/infrastructure-components.yaml'
+    allow(described_class).to receive(:prepare_capone_repository).and_return(capone_components)
     allow(described_class).to receive(:bash) do |value|
       script = value
       timeout_config = File.read(value.match(/--config (\S+)/)[1])
@@ -69,7 +116,12 @@ RSpec.describe Service::OneKS do
     end
     expect(described_class).to receive(:qualify_provider_startup).with('/run/qualification.kubeconfig')
     described_class.initialize_providers('/run/qualification.kubeconfig')
-    expect(timeout_config).to eq("cert-manager:\n  timeout: #{ONEKS_READY_TIMEOUT_SECONDS}s\n")
+    expect(timeout_config).to include(
+      "cert-manager:\n  timeout: #{ONEKS_READY_TIMEOUT_SECONDS}s\n",
+      'name: opennebula',
+      "url: #{capone_components}",
+      'type: InfrastructureProvider'
+    )
     expect(script).to include('--core=cluster-api:v1.13.5', '--bootstrap=rke2:v0.25.2',
                              '--control-plane=rke2:v0.25.2', '--infrastructure=opennebula:v0.1.8')
   end
