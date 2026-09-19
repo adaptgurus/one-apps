@@ -244,7 +244,13 @@ module Service
                         exit 1
                     end
 
-                    initialize_providers(ONEKS_MGMT_KUBECONFIG_PATH)
+                    begin
+                        initialize_providers(ONEKS_MGMT_KUBECONFIG_PATH)
+                    rescue StandardError => e
+                        msg :error, "Management provider initialization failed: #{e.class}: #{e.message}"
+                        report_onegate_state('PROVISIONING_FAILURE', 'MGMT_PROVIDER_INIT_FAILED')
+                        exit 1
+                    end
 
                     msg :info, 'Deploy Workload Cluster'
                     report_onegate_state('PROVISIONING_CP')
@@ -316,7 +322,13 @@ module Service
                     end
 
                     msg :info, 'Initialize CAPI on Workload Cluster'
-                    initialize_providers(ONEKS_WKLD_KUBECONFIG_PATH)
+                    begin
+                        initialize_providers(ONEKS_WKLD_KUBECONFIG_PATH)
+                    rescue StandardError => e
+                        msg :error, "Workload provider initialization failed: #{e.class}: #{e.message}"
+                        report_onegate_state('PIVOTING_FAILURE', 'WKLD_PROVIDER_INIT_FAILED')
+                        exit 1
+                    end
 
                     msg :info, 'Move CAPI objects to Workload Cluster'
                     success = begin_retry?(30, 10) do
