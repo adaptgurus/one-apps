@@ -26,6 +26,39 @@ RSpec.describe Service::OneKS do
     end.to raise_error(/Unqualified OneKS provider set/)
   end
 
+  it 'requires the management Kubernetes readyz endpoint before provider init' do
+    status = double('status', success?: true)
+    expect(Open3).to receive(:capture3).with(
+      'kubectl', '--kubeconfig', '/run/mgmt.kubeconfig',
+      'get', '--raw=/readyz', '--request-timeout=5s'
+    ).and_return(["ok\n", '', status])
+
+    expect(
+      described_class.wait_for_management_api(
+        '/run/mgmt.kubeconfig', timeout_seconds: 60, interval_seconds: 1
+      )
+    ).to be(true)
+  end
+
+  it 'reports management API readiness failure before provider init' do
+    stub_const('ONEKS_CLUSTER_SPEC', Base64.strict_encode64("apiVersion: v1\nkind: List\nitems: []\n"))
+    reported = []
+    allow(described_class).to receive(:start_onegate_heartbeat)
+    allow(described_class).to receive(:stop_onegate_heartbeat)
+    allow(described_class).to receive(:bash).and_return('')
+    allow(described_class).to receive(:report_onegate_state) do |state, code = 'NONE'|
+      reported << [state, code]
+    end
+    allow(described_class).to receive(:wait_for_management_api)
+      .with(ONEKS_MGMT_KUBECONFIG_PATH)
+      .and_raise('readyz unavailable')
+    expect(described_class).not_to receive(:initialize_providers)
+
+    expect { described_class.configure }.to raise_error(SystemExit)
+    expect(reported).to include(['PROVISIONING_FAILURE', 'MGMT_API_NOT_READY'])
+    expect(reported).not_to include(['PROVISIONING_FAILURE', 'PROVISIONING_EXCEPTION'])
+  end
+
   it 'reports management provider initialization failures explicitly' do
     stub_const('ONEKS_CLUSTER_SPEC', Base64.strict_encode64("apiVersion: v1\nkind: List\nitems: []\n"))
     reported = []
