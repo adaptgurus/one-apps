@@ -41,6 +41,9 @@ jobs:
           ruby -c appliances/OneKS/tests.rb
           ruby -c appliances/OneKS/heartbeat_tests.rb
           ruby -c appliances/OneKS/provider_compatibility_tests.rb
+          bash -n packer/service_OneKS/82-configure-context.sh
+          grep -q 'qemu-guest-agent restart' packer/service_OneKS/82-configure-context.sh
+          grep -q 'OneKS early diagnostics before long-running configure' packer/service_OneKS/82-configure-context.sh
           bash -n packer/make-cloud-init-iso.sh
           bash -n packer/rocky/90-custom-scripts/95-layersentry-rke2-airgap.sh
           bash -n packer/layersentry-poc/build-rocky-rke2-airgap.sh
