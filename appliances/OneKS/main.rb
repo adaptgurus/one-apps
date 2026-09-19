@@ -27,6 +27,7 @@ require 'base64'
 require 'open3'
 require 'rbconfig'
 require 'tempfile'
+require 'fileutils'
 
 # Base module for OpenNebula services
 module Service
@@ -63,9 +64,78 @@ module Service
             bash "podman pull #{ONEKS_KIND_IMAGE}"
         end
 
+        def validate_provider_contracts!(
+            capi_version: ONEKS_CLUSTERCTL_VERSION,
+            capi_contract: ONEKS_CAPI_CONTRACT,
+            caprke2_contract: ONEKS_CAPRKE2_CONTRACT,
+            capone_contract: ONEKS_CAPONE_CONTRACT
+        )
+            raise 'CAPRKE2 contract must match the CAPI contract' unless caprke2_contract == capi_contract
+
+            capi_minor = capi_version.to_s.split('.')[1].to_i
+            if capi_contract == 'v1beta2' && capone_contract == 'v1beta1'
+                raise 'CAPONE v1beta1 contract is no longer compatible with this CAPI release' \
+                    if capi_minor >= 16
+                return true
+            end
+
+            raise 'CAPONE contract must match the CAPI contract' unless capone_contract == capi_contract
+
+            true
+        end
+
+        def prepare_capone_repository
+            validate_provider_contracts!
+
+            provider_dir = File.join(
+                ONEKS_PROVIDER_REPOSITORY_PATH,
+                'infrastructure-opennebula',
+                "v#{ONEKS_CAPONE_VERSION}"
+            )
+            FileUtils.mkdir_p(provider_dir, :mode => 0o700)
+
+            components = File.join(provider_dir, 'infrastructure-components.yaml')
+            metadata   = File.join(provider_dir, 'metadata.yaml')
+
+            source = ONEKS_CAPONE_COMPONENTS_SOURCE.to_s
+            if source.start_with?('/')
+                raise "CAPONE components not found: #{source}" unless File.file?(source)
+
+                FileUtils.cp(source, components)
+            else
+                _out, err, status = Open3.capture3('curl', '-fsSL', source, '-o', components)
+                raise "Unable to fetch pinned CAPONE components: #{err.to_s.lines.first}" \
+                    unless status.success?
+            end
+
+            raise 'CAPONE components are empty' unless File.file?(components) && File.size?(components)
+
+            File.write(
+                metadata,
+                "apiVersion: clusterctl.cluster.x-k8s.io/v1alpha3\n" \
+                "kind: Metadata\n" \
+                "releaseSeries:\n" \
+                "  - major: 0\n" \
+                "    minor: 1\n" \
+                "    contract: #{ONEKS_CAPONE_CONTRACT}\n"
+            )
+            File.chmod(0o600, components, metadata)
+
+            components
+        end
+
         def initialize_providers(kubeconfig)
+            capone_components = prepare_capone_repository
+
             Tempfile.create(['oneks-clusterctl-', '.yaml']) do |config|
-                config.write("cert-manager:\n  timeout: #{ONEKS_READY_TIMEOUT_SECONDS}s\n")
+                config.write(
+                    "cert-manager:\n" \
+                    "  timeout: #{ONEKS_READY_TIMEOUT_SECONDS}s\n" \
+                    "providers:\n" \
+                    "  - name: opennebula\n" \
+                    "    url: #{capone_components}\n" \
+                    "    type: InfrastructureProvider\n"
+                )
                 config.flush
                 bash <<~SCRIPT
                     clusterctl init \
