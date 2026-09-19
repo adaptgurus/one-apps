@@ -27,6 +27,8 @@ require 'base64'
 require 'open3'
 require 'rbconfig'
 require 'tempfile'
+require 'fileutils'
+require 'yaml'
 
 # Base module for OpenNebula services
 module Service
@@ -63,9 +65,45 @@ module Service
             bash "podman pull #{ONEKS_KIND_IMAGE}"
         end
 
+        def validate_provider_metadata!(metadata, provider_label)
+            expected_api = 'clusterctl.cluster.x-k8s.io/v1alpha3'
+            raise "#{provider_label} metadata apiVersion must be #{expected_api}" unless metadata['apiVersion'] == expected_api
+            raise "#{provider_label} metadata kind must be Metadata" unless metadata['kind'] == 'Metadata'
+
+            series = metadata['releaseSeries']
+            raise "#{provider_label} metadata releaseSeries must not be empty" unless series.is_a?(Array) && !series.empty?
+
+            true
+        end
+
+        def prepare_provider_overrides
+            raise "Unqualified CAPONE metadata override version #{ONEKS_CAPONE_VERSION}" unless ONEKS_CAPONE_VERSION == '0.1.8'
+
+            metadata = {
+                'apiVersion' => 'clusterctl.cluster.x-k8s.io/v1alpha3',
+                'kind' => 'Metadata',
+                'releaseSeries' => [
+                    {'major' => 0, 'minor' => 1, 'contract' => 'v1beta1'}
+                ]
+            }
+            validate_provider_metadata!(metadata, "opennebula:v#{ONEKS_CAPONE_VERSION}")
+
+            directory = File.join(
+                ONEKS_PROVIDER_OVERRIDES_PATH,
+                'infrastructure-opennebula',
+                "v#{ONEKS_CAPONE_VERSION}"
+            )
+            FileUtils.mkdir_p(directory, :mode => 0o700)
+            path = File.join(directory, 'metadata.yaml')
+            File.write(path, YAML.dump(metadata), :mode => 'w', :perm => 0o600)
+            path
+        end
+
         def initialize_providers(kubeconfig)
+            prepare_provider_overrides
             Tempfile.create(['oneks-clusterctl-', '.yaml']) do |config|
                 config.write("cert-manager:\n  timeout: #{ONEKS_READY_TIMEOUT_SECONDS}s\n")
+                config.write("overridesFolder: #{ONEKS_PROVIDER_OVERRIDES_PATH}\n")
                 config.flush
                 bash <<~SCRIPT
                     clusterctl init \
