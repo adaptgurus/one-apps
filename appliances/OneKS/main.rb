@@ -67,21 +67,36 @@ module Service
 
         def validate_provider_contracts!(
             capi_version: ONEKS_CLUSTERCTL_VERSION,
+            caprke2_version: ONEKS_CAPRKE2_VERSION,
+            capone_version: ONEKS_CAPONE_VERSION,
             capi_contract: ONEKS_CAPI_CONTRACT,
             caprke2_contract: ONEKS_CAPRKE2_CONTRACT,
             capone_contract: ONEKS_CAPONE_CONTRACT
         )
-            raise 'CAPRKE2 contract must match the CAPI contract' unless caprke2_contract == capi_contract
+            qualified = {
+                :capi_version => '1.13.5',
+                :caprke2_version => '0.25.2',
+                :capone_version => '0.1.8',
+                :capi_contract => 'v1beta2',
+                :caprke2_contract => 'v1beta2',
+                :capone_contract => 'v1beta1'
+            }
+            actual = {
+                :capi_version => capi_version.to_s,
+                :caprke2_version => caprke2_version.to_s,
+                :capone_version => capone_version.to_s,
+                :capi_contract => capi_contract.to_s,
+                :caprke2_contract => caprke2_contract.to_s,
+                :capone_contract => capone_contract.to_s
+            }
 
-            capi_minor = capi_version.to_s.split('.')[1].to_i
-            if capi_contract == 'v1beta2' && capone_contract == 'v1beta1'
-                raise 'CAPONE v1beta1 contract is no longer compatible with this CAPI release' \
-                    if capi_minor >= 16
-                return true
+            unless actual == qualified
+                raise "Unqualified OneKS provider set: #{actual.inspect}; expected #{qualified.inspect}"
             end
 
-            raise 'CAPONE contract must match the CAPI contract' unless capone_contract == capi_contract
-
+            # CAPI v1.13's v1beta2 contract intentionally preserves compatibility
+            # with v1beta1 infrastructure providers. CAPONE 0.1.8 remains pinned
+            # until it is migrated and live-qualified against the v1beta2 contract.
             true
         end
 
