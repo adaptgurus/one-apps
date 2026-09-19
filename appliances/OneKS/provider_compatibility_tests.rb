@@ -6,26 +6,24 @@ require 'yaml'
 require_relative 'main'
 
 RSpec.describe Service::OneKS do
-  it 'accepts only the qualified CAPI/CAPRKE2/CAPONE contract combination' do
+  it 'accepts only the exact live-qualified provider set' do
     expect(described_class.validate_provider_contracts!).to be(true)
 
     expect do
-      described_class.validate_provider_contracts!(
-        capi_version: '1.16.0',
-        capi_contract: 'v1beta2',
-        caprke2_contract: 'v1beta2',
-        capone_contract: 'v1beta1'
-      )
-    end.to raise_error(/CAPONE v1beta1 contract is no longer compatible/)
+      described_class.validate_provider_contracts!(capi_version: '1.13.6')
+    end.to raise_error(/Unqualified OneKS provider set/)
 
     expect do
-      described_class.validate_provider_contracts!(
-        capi_version: '1.13.5',
-        capi_contract: 'v1beta2',
-        caprke2_contract: 'v1beta1',
-        capone_contract: 'v1beta1'
-      )
-    end.to raise_error(/CAPRKE2 contract must match/)
+      described_class.validate_provider_contracts!(caprke2_version: '0.25.3')
+    end.to raise_error(/Unqualified OneKS provider set/)
+
+    expect do
+      described_class.validate_provider_contracts!(capone_version: '0.1.9')
+    end.to raise_error(/Unqualified OneKS provider set/)
+
+    expect do
+      described_class.validate_provider_contracts!(capone_contract: 'v1beta2')
+    end.to raise_error(/Unqualified OneKS provider set/)
   end
 
   it 'rejects CAPONE metadata that clusterctl 1.11+ rejects' do
