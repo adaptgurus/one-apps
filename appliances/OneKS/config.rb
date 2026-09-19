@@ -43,6 +43,15 @@ ONEKS_HEARTBEAT_SEQ_KEY = 'ONEKS_HEARTBEAT_SEQ'
 ONEKS_ERROR_CODE_KEY = 'ONEKS_ERROR_CODE'
 
 ONEKS_CAPRKE2_VERSION = env :ONEAPP_ONEKS_CAPRKE2_VERSION, '0.25.2'
+ONEKS_CAPI_CONTRACT = 'v1beta2'
+ONEKS_CAPRKE2_CONTRACT = 'v1beta2'
+ONEKS_CAPONE_CONTRACT = 'v1beta1'
+ONEKS_PROVIDER_REPOSITORY_PATH = "#{ONEKS_APPLIANCE_PATH}/providers"
+ONEKS_CAPONE_COMPONENTS_SOURCE = env(
+    :ONEAPP_ONEKS_CAPONE_COMPONENTS_SOURCE,
+    "https://github.com/OpenNebula/cluster-api-provider-opennebula/releases/download/" \
+    "v#{ONEKS_CAPONE_VERSION}/infrastructure-components.yaml"
+)
 ONEKS_KIND_IMAGE = 'docker.io/kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5'
 # Version overrides require corresponding reviewed release digests.
 ONEKS_BINARY_DIGESTS = {
