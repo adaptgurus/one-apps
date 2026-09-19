@@ -21,9 +21,7 @@ RSpec.describe Service::OneKS do
 
   it 'creates a strict-valid local metadata override for the pinned CAPONE release' do
     Dir.mktmpdir do |dir|
-      stub_const('ONEKS_PROVIDER_OVERRIDES_PATH', dir)
-
-      described_class.prepare_provider_overrides
+      described_class.prepare_provider_overrides(dir)
 
       path = File.join(
         dir,
@@ -32,6 +30,8 @@ RSpec.describe Service::OneKS do
         'metadata.yaml'
       )
       expect(File).to exist(path)
+      expect(File.stat(path).mode & 0o777).to eq(0o600)
+      expect(File.stat(File.dirname(path)).mode & 0o777).to eq(0o700)
 
       metadata = YAML.safe_load(File.read(path))
       expect(metadata.fetch('apiVersion')).to eq('clusterctl.cluster.x-k8s.io/v1alpha3')
@@ -50,7 +50,6 @@ RSpec.describe Service::OneKS do
 
   it 'passes the override folder to clusterctl before provider initialization' do
     Dir.mktmpdir do |dir|
-      stub_const('ONEKS_PROVIDER_OVERRIDES_PATH', dir)
       script = nil
       config_body = nil
 
@@ -62,7 +61,7 @@ RSpec.describe Service::OneKS do
       end
       allow(described_class).to receive(:qualify_provider_startup)
 
-      described_class.initialize_providers('/run/qualification.kubeconfig')
+      described_class.initialize_providers('/run/qualification.kubeconfig', overrides_path: dir)
 
       expect(config_body).to include("overridesFolder: #{dir}")
       expect(script).to include('--infrastructure=opennebula:v0.1.8')
