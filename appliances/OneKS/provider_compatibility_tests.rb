@@ -68,6 +68,8 @@ RSpec.describe Service::OneKS do
     allow(described_class).to receive(:report_onegate_state) do |state, code = 'NONE'|
       reported << [state, code]
     end
+    allow(described_class).to receive(:wait_for_management_api)
+      .with(ONEKS_MGMT_KUBECONFIG_PATH).and_return(true)
     allow(described_class).to receive(:initialize_providers)
       .with(ONEKS_MGMT_KUBECONFIG_PATH)
       .and_raise('metadata validation failed')
@@ -87,6 +89,8 @@ RSpec.describe Service::OneKS do
     allow(described_class).to receive(:stop_onegate_heartbeat)
     allow(described_class).to receive(:bash).and_return('')
     allow(described_class).to receive(:begin_retry?).and_return(true)
+    allow(described_class).to receive(:wait_for_management_api)
+      .with(ONEKS_MGMT_KUBECONFIG_PATH).and_return(true)
     allow(described_class).to receive(:report_onegate_state) do |state, code = 'NONE'|
       reported << [state, code]
     end
