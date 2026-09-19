@@ -28,6 +28,7 @@ require 'open3'
 require 'rbconfig'
 require 'tempfile'
 require 'fileutils'
+require 'yaml'
 
 # Base module for OpenNebula services
 module Service
@@ -84,58 +85,51 @@ module Service
             true
         end
 
-        def prepare_capone_repository
-            validate_provider_contracts!
+        def validate_provider_metadata!(metadata, provider_label)
+            expected_api = 'clusterctl.cluster.x-k8s.io/v1alpha3'
+            raise "#{provider_label} metadata apiVersion must be #{expected_api}" unless metadata['apiVersion'] == expected_api
+            raise "#{provider_label} metadata kind must be Metadata" unless metadata['kind'] == 'Metadata'
 
-            provider_dir = File.join(
-                ONEKS_PROVIDER_REPOSITORY_PATH,
+            series = metadata['releaseSeries']
+            raise "#{provider_label} metadata releaseSeries must not be empty" unless series.is_a?(Array) && !series.empty?
+
+            true
+        end
+
+        def prepare_provider_overrides(overrides_path = ONEKS_PROVIDER_OVERRIDES_PATH)
+            validate_provider_contracts!
+            raise "Unqualified CAPONE metadata override version #{ONEKS_CAPONE_VERSION}" unless ONEKS_CAPONE_VERSION == '0.1.8'
+            raise 'Provider overrides path must be absolute' unless overrides_path.to_s.start_with?('/')
+
+            metadata = {
+                'apiVersion' => 'clusterctl.cluster.x-k8s.io/v1alpha3',
+                'kind' => 'Metadata',
+                'releaseSeries' => [
+                    {'major' => 0, 'minor' => 1, 'contract' => 'v1beta1'}
+                ]
+            }
+            validate_provider_metadata!(metadata, "opennebula:v#{ONEKS_CAPONE_VERSION}")
+
+            directory = File.join(
+                overrides_path,
                 'infrastructure-opennebula',
                 "v#{ONEKS_CAPONE_VERSION}"
             )
-            FileUtils.mkdir_p(provider_dir, :mode => 0o700)
-
-            components = File.join(provider_dir, 'infrastructure-components.yaml')
-            metadata   = File.join(provider_dir, 'metadata.yaml')
-
-            source = ONEKS_CAPONE_COMPONENTS_SOURCE.to_s
-            if source.start_with?('/')
-                raise "CAPONE components not found: #{source}" unless File.file?(source)
-
-                FileUtils.cp(source, components)
-            else
-                _out, err, status = Open3.capture3('curl', '-fsSL', source, '-o', components)
-                raise "Unable to fetch pinned CAPONE components: #{err.to_s.lines.first}" \
-                    unless status.success?
+            FileUtils.mkdir_p(directory, :mode => 0o700)
+            File.chmod(0o700, directory)
+            path = File.join(directory, 'metadata.yaml')
+            File.open(path, File::WRONLY | File::CREAT | File::TRUNC, 0o600) do |file|
+                file.write(YAML.dump(metadata))
             end
-
-            raise 'CAPONE components are empty' unless File.file?(components) && File.size?(components)
-
-            File.write(
-                metadata,
-                "apiVersion: clusterctl.cluster.x-k8s.io/v1alpha3\n" \
-                "kind: Metadata\n" \
-                "releaseSeries:\n" \
-                "  - major: 0\n" \
-                "    minor: 1\n" \
-                "    contract: #{ONEKS_CAPONE_CONTRACT}\n"
-            )
-            File.chmod(0o600, components, metadata)
-
-            components
+            File.chmod(0o600, path)
+            path
         end
 
-        def initialize_providers(kubeconfig)
-            capone_components = prepare_capone_repository
-
+        def initialize_providers(kubeconfig, overrides_path: ONEKS_PROVIDER_OVERRIDES_PATH)
+            prepare_provider_overrides(overrides_path)
             Tempfile.create(['oneks-clusterctl-', '.yaml']) do |config|
-                config.write(
-                    "cert-manager:\n" \
-                    "  timeout: #{ONEKS_READY_TIMEOUT_SECONDS}s\n" \
-                    "providers:\n" \
-                    "  - name: opennebula\n" \
-                    "    url: #{capone_components}\n" \
-                    "    type: InfrastructureProvider\n"
-                )
+                config.write("cert-manager:\n  timeout: #{ONEKS_READY_TIMEOUT_SECONDS}s\n")
+                config.write("overridesFolder: #{overrides_path}\n")
                 config.flush
                 bash <<~SCRIPT
                     clusterctl init \
