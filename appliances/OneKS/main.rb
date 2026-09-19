@@ -65,6 +65,31 @@ module Service
             bash "podman pull #{ONEKS_KIND_IMAGE}"
         end
 
+        def wait_for_management_api(
+            kubeconfig,
+            timeout_seconds: ONEKS_MGMT_API_TIMEOUT_SECONDS,
+            interval_seconds: ONEKS_MGMT_API_INTERVAL_SECONDS
+        )
+            deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout_seconds
+            last_error = nil
+
+            loop do
+                out, err, status = Open3.capture3(
+                    'kubectl', '--kubeconfig', kubeconfig,
+                    'get', '--raw=/readyz', '--request-timeout=5s'
+                )
+                return true if status.success? && out.to_s.strip == 'ok'
+
+                last_error = err.to_s.lines.first.to_s.strip
+                break if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+
+                sleep interval_seconds
+            end
+
+            detail = last_error.empty? ? '' : ": #{last_error}"
+            raise "Management Kubernetes API did not become ready within #{timeout_seconds}s#{detail}"
+        end
+
         def validate_provider_contracts!(
             capi_version: ONEKS_CLUSTERCTL_VERSION,
             caprke2_version: ONEKS_CAPRKE2_VERSION,
@@ -241,6 +266,14 @@ module Service
                     SCRIPT
                         msg :error, 'Failed to start Management Cluster'
                         report_onegate_state('PROVISIONING_FAILURE', 'MGMT_CLUSTER_START_FAILED')
+                        exit 1
+                    end
+
+                    begin
+                        wait_for_management_api(ONEKS_MGMT_KUBECONFIG_PATH)
+                    rescue StandardError => e
+                        msg :error, "Management Kubernetes API readiness failed: #{e.class}: #{e.message}"
+                        report_onegate_state('PROVISIONING_FAILURE', 'MGMT_API_NOT_READY')
                         exit 1
                     end
 
