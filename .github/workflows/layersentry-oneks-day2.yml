@@ -8,6 +8,7 @@ on:
   pull_request:
     branches:
       - layersentry/p1-rke2-provisioning
+      - layersentry/p1-rke2-day2-production-20260913
     paths:
       - 'appliances/OneKS/**'
       - 'packer/rocky/**'
