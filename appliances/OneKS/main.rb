@@ -76,8 +76,9 @@ module Service
             true
         end
 
-        def prepare_provider_overrides
+        def prepare_provider_overrides(overrides_path = ONEKS_PROVIDER_OVERRIDES_PATH)
             raise "Unqualified CAPONE metadata override version #{ONEKS_CAPONE_VERSION}" unless ONEKS_CAPONE_VERSION == '0.1.8'
+            raise 'Provider overrides path must be absolute' unless overrides_path.to_s.start_with?('/')
 
             metadata = {
                 'apiVersion' => 'clusterctl.cluster.x-k8s.io/v1alpha3',
@@ -89,21 +90,25 @@ module Service
             validate_provider_metadata!(metadata, "opennebula:v#{ONEKS_CAPONE_VERSION}")
 
             directory = File.join(
-                ONEKS_PROVIDER_OVERRIDES_PATH,
+                overrides_path,
                 'infrastructure-opennebula',
                 "v#{ONEKS_CAPONE_VERSION}"
             )
             FileUtils.mkdir_p(directory, :mode => 0o700)
+            File.chmod(0o700, directory)
             path = File.join(directory, 'metadata.yaml')
-            File.write(path, YAML.dump(metadata), :mode => 'w', :perm => 0o600)
+            File.open(path, File::WRONLY | File::CREAT | File::TRUNC, 0o600) do |file|
+                file.write(YAML.dump(metadata))
+            end
+            File.chmod(0o600, path)
             path
         end
 
-        def initialize_providers(kubeconfig)
-            prepare_provider_overrides
+        def initialize_providers(kubeconfig, overrides_path: ONEKS_PROVIDER_OVERRIDES_PATH)
+            prepare_provider_overrides(overrides_path)
             Tempfile.create(['oneks-clusterctl-', '.yaml']) do |config|
                 config.write("cert-manager:\n  timeout: #{ONEKS_READY_TIMEOUT_SECONDS}s\n")
-                config.write("overridesFolder: #{ONEKS_PROVIDER_OVERRIDES_PATH}\n")
+                config.write("overridesFolder: #{overrides_path}\n")
                 config.flush
                 bash <<~SCRIPT
                     clusterctl init \
