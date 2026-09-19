@@ -51,5 +51,24 @@ jobs:
             appliances/OneKS/tests.rb \
             appliances/OneKS/heartbeat_tests.rb \
             appliances/OneKS/provider_compatibility_tests.rb
+      - name: Real clusterctl CAPONE override qualification
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            https://github.com/kubernetes-sigs/cluster-api/releases/download/v1.13.5/clusterctl-linux-amd64 \
+            -o /tmp/clusterctl
+          echo '975e697ba4cb62f148e3709b6b102ed2c045d6c77f1fd20fd0d8cd328a22a0b9  /tmp/clusterctl' \
+            | sha256sum -c -
+          chmod 0700 /tmp/clusterctl
+          override_dir="$(mktemp -d)"
+          OVERRIDE_DIR="$override_dir" ruby -r ./appliances/OneKS/main -e \
+            'Service::OneKS.prepare_provider_overrides(ENV.fetch("OVERRIDE_DIR"))'
+          printf 'overridesFolder: %s\n' "$override_dir" > /tmp/clusterctl-qualification.yaml
+          /tmp/clusterctl generate provider \
+            --config /tmp/clusterctl-qualification.yaml \
+            --infrastructure opennebula:v0.1.8 \
+            --raw > /tmp/capone-components.yaml
+          test -s /tmp/capone-components.yaml
+          grep -q 'kind: Deployment' /tmp/capone-components.yaml
       - name: Rocky RKE2 air-gap source checks
         run: packer/layersentry-poc/test-rocky-rke2-airgap.sh
