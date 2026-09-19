@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - layersentry/p1-rke2-day2-production-20260913
+      - fix/oneks-provider-preflight-20260919
   pull_request:
     branches:
       - layersentry/p1-rke2-provisioning
@@ -39,6 +40,7 @@ jobs:
           ruby -c appliances/OneKS/main.rb
           ruby -c appliances/OneKS/tests.rb
           ruby -c appliances/OneKS/heartbeat_tests.rb
+          ruby -c appliances/OneKS/provider_compatibility_tests.rb
           bash -n packer/make-cloud-init-iso.sh
           bash -n packer/rocky/90-custom-scripts/95-layersentry-rke2-airgap.sh
           bash -n packer/layersentry-poc/build-rocky-rke2-airgap.sh
@@ -47,5 +49,6 @@ jobs:
         run: |
           ruby appliances/OneKS/tests.rb
           ruby appliances/OneKS/heartbeat_tests.rb
+          ruby appliances/OneKS/provider_compatibility_tests.rb
       - name: Rocky RKE2 air-gap source checks
         run: packer/layersentry-poc/test-rocky-rke2-airgap.sh
