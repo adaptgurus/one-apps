@@ -87,6 +87,8 @@ RSpec.describe Service::OneKS do
     allow(described_class).to receive(:bash) { |script| commands << script; '' }
     allow(described_class).to receive(:onegate_vm_update)
     allow(described_class).to receive(:qualify_provider_startup)
+    allow(described_class).to receive(:wait_for_management_api)
+      .with(ONEKS_MGMT_KUBECONFIG_PATH).and_return(true)
     allow(described_class).to receive(:prepare_provider_overrides).and_return('/tmp/provider-metadata.yaml')
     allow(described_class).to receive(:begin_retry?).and_yield.and_return(true)
     status = double('status', success?: true)
