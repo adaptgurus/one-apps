@@ -48,8 +48,9 @@ jobs:
           bash -n packer/layersentry-poc/test-rocky-rke2-airgap.sh
       - name: OneKS appliance regression tests
         run: |
-          ruby appliances/OneKS/tests.rb
-          ruby appliances/OneKS/heartbeat_tests.rb
-          ruby appliances/OneKS/provider_compatibility_tests.rb
+          rspec --format documentation \
+            appliances/OneKS/tests.rb \
+            appliances/OneKS/heartbeat_tests.rb \
+            appliances/OneKS/provider_compatibility_tests.rb
       - name: Rocky RKE2 air-gap source checks
         run: packer/layersentry-poc/test-rocky-rke2-airgap.sh
