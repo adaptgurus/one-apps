@@ -29,6 +29,7 @@ require 'rbconfig'
 require 'tempfile'
 require 'fileutils'
 require 'yaml'
+require_relative 'management_bootstrap'
 
 # Base module for OpenNebula services
 module Service
@@ -255,16 +256,10 @@ module Service
 
                     msg :info, 'Start Management Cluster'
                     report_onegate_state('PROVISIONING_MGMT')
-                    unless bash <<~SCRIPT
-                        umask 077
-                        if ! kind get clusters | grep -qx kind; then
-                            kind create cluster --image #{ONEKS_KIND_IMAGE} --wait 600s
-                        else
-                            podman start kind-control-plane
-                        fi
-                        kind get kubeconfig > #{ONEKS_MGMT_KUBECONFIG_PATH}
-                    SCRIPT
-                        msg :error, 'Failed to start Management Cluster'
+                    begin
+                        start_management_cluster
+                    rescue StandardError => e
+                        msg :error, "Failed to start Management Cluster: #{e.class}"
                         report_onegate_state('PROVISIONING_FAILURE', 'MGMT_CLUSTER_START_FAILED')
                         exit 1
                     end
@@ -436,7 +431,7 @@ module Service
                 @heartbeat_cv.broadcast
             end
             @heartbeat_thread.join(5)
-            @heartbeat_thread.kill if @heartbeat_thread.alive?
+            @heartbeat_thread.kill.join if @heartbeat_thread.alive?
             @heartbeat_thread = nil
         end
 
