@@ -10,6 +10,9 @@ on:
       - layersentry/p1-rke2-day2-production-20260913
     paths:
       - 'appliances/OneKS/**'
+      - 'appliances/lib/helpers.rb'
+      - 'appliances/service.rb'
+      - 'packer/service_OneKS/**'
       - 'packer/rocky/**'
       - 'packer/layersentry-poc/**'
       - 'packer/build.sh'
@@ -22,6 +25,22 @@ permissions:
   contents: read
 
 jobs:
+  alpine-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate dependency probe syntax
+        run: sh -n packer/service_OneKS/test-alpine-runtime.sh
+      - name: Load real OneKS with the Alpine builder package set
+        run: |
+          set -euo pipefail
+          docker pull alpine:3.24
+          image=$(docker image inspect alpine:3.24 --format '{{.Id}}')
+          docker image inspect alpine:3.24 --format '{{json .RepoDigests}}'
+          docker run --rm --pull=never --security-opt=no-new-privileges \
+            -v "$GITHUB_WORKSPACE:/src:ro" -w /src "$image" \
+            sh packer/service_OneKS/test-alpine-runtime.sh
   seed:
     runs-on: ubuntu-24.04
     steps:
@@ -41,6 +60,8 @@ jobs:
           ruby -c appliances/OneKS/tests.rb
           ruby -c appliances/OneKS/heartbeat_tests.rb
           ruby -c appliances/OneKS/provider_compatibility_tests.rb
+          bash -n packer/service_OneKS/build-opennebula.sh
+          sh -n packer/service_OneKS/test-alpine-runtime.sh
           bash -n packer/service_OneKS/82-configure-context.sh
           grep -q 'qemu-guest-agent restart' packer/service_OneKS/82-configure-context.sh
           grep -q 'OneKS early diagnostics before long-running configure' packer/service_OneKS/82-configure-context.sh
