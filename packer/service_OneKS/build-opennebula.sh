@@ -7,7 +7,7 @@ src=$(cd "$(dirname "$0")/../.." && pwd)
 test ! -e /etc/one-appliance/service.d/OneKS
 # Resolve packages from the configured repository set without relying on a
 # pre-populated APK index. podman-openrc owns /etc/init.d/podman on Alpine.
-apk add --no-cache bash curl ruby ruby-base64 podman podman-openrc iptables ip6tables
+apk add --no-cache bash curl ruby ruby-base64 openrc podman podman-openrc iptables ip6tables
 # Alpine packages Ruby's bundled base64 gem separately. Load the actual appliance
 # before installing service hooks or starting any build-time container services.
 ruby -r "$src/appliances/OneKS/main.rb" -e 'Service::OneKS.validate_provider_contracts!'
