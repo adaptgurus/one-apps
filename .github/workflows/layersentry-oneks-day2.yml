@@ -28,6 +28,8 @@ jobs:
   alpine-runtime:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    env:
+      ALPINE_TEST_IMAGE: alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
     steps:
       - uses: actions/checkout@v4
       - name: Validate dependency probe syntax
@@ -35,9 +37,9 @@ jobs:
       - name: Load real OneKS with the Alpine builder package set
         run: |
           set -euo pipefail
-          docker pull alpine:3.24
-          image=$(docker image inspect alpine:3.24 --format '{{.Id}}')
-          docker image inspect alpine:3.24 --format '{{json .RepoDigests}}'
+          docker pull "$ALPINE_TEST_IMAGE"
+          image=$(docker image inspect "$ALPINE_TEST_IMAGE" --format '{{.Id}}')
+          docker image inspect "$ALPINE_TEST_IMAGE" --format '{{json .RepoDigests}}'
           docker run --rm --pull=never --security-opt=no-new-privileges \
             -v "$GITHUB_WORKSPACE:/src:ro" -w /src "$image" \
             sh packer/service_OneKS/test-alpine-runtime.sh
