@@ -27,6 +27,8 @@ require 'base64'
 require 'open3'
 require 'rbconfig'
 require 'tempfile'
+require 'fileutils'
+require 'yaml'
 
 # Base module for OpenNebula services
 module Service
@@ -63,9 +65,111 @@ module Service
             bash "podman pull #{ONEKS_KIND_IMAGE}"
         end
 
-        def initialize_providers(kubeconfig)
+        def wait_for_management_api(
+            kubeconfig,
+            timeout_seconds: ONEKS_MGMT_API_TIMEOUT_SECONDS,
+            interval_seconds: ONEKS_MGMT_API_INTERVAL_SECONDS
+        )
+            deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout_seconds
+            last_error = nil
+
+            loop do
+                out, err, status = Open3.capture3(
+                    'kubectl', '--kubeconfig', kubeconfig,
+                    'get', '--raw=/readyz', '--request-timeout=5s'
+                )
+                return true if status.success? && out.to_s.strip == 'ok'
+
+                last_error = err.to_s.lines.first.to_s.strip
+                break if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+
+                sleep interval_seconds
+            end
+
+            detail = last_error.empty? ? '' : ": #{last_error}"
+            raise "Management Kubernetes API did not become ready within #{timeout_seconds}s#{detail}"
+        end
+
+        def validate_provider_contracts!(
+            capi_version: ONEKS_CLUSTERCTL_VERSION,
+            caprke2_version: ONEKS_CAPRKE2_VERSION,
+            capone_version: ONEKS_CAPONE_VERSION,
+            capi_contract: ONEKS_CAPI_CONTRACT,
+            caprke2_contract: ONEKS_CAPRKE2_CONTRACT,
+            capone_contract: ONEKS_CAPONE_CONTRACT
+        )
+            qualified = {
+                :capi_version => '1.13.5',
+                :caprke2_version => '0.25.2',
+                :capone_version => '0.1.8',
+                :capi_contract => 'v1beta2',
+                :caprke2_contract => 'v1beta2',
+                :capone_contract => 'v1beta1'
+            }
+            actual = {
+                :capi_version => capi_version.to_s,
+                :caprke2_version => caprke2_version.to_s,
+                :capone_version => capone_version.to_s,
+                :capi_contract => capi_contract.to_s,
+                :caprke2_contract => caprke2_contract.to_s,
+                :capone_contract => capone_contract.to_s
+            }
+
+            unless actual == qualified
+                raise "Unqualified OneKS provider set: #{actual.inspect}; expected #{qualified.inspect}"
+            end
+
+            # CAPI v1.13's v1beta2 contract intentionally preserves compatibility
+            # with v1beta1 infrastructure providers. CAPONE 0.1.8 remains pinned
+            # until it is migrated and live-qualified against the v1beta2 contract.
+            true
+        end
+
+        def validate_provider_metadata!(metadata, provider_label)
+            expected_api = 'clusterctl.cluster.x-k8s.io/v1alpha3'
+            raise "#{provider_label} metadata apiVersion must be #{expected_api}" unless metadata['apiVersion'] == expected_api
+            raise "#{provider_label} metadata kind must be Metadata" unless metadata['kind'] == 'Metadata'
+
+            series = metadata['releaseSeries']
+            raise "#{provider_label} metadata releaseSeries must not be empty" unless series.is_a?(Array) && !series.empty?
+
+            true
+        end
+
+        def prepare_provider_overrides(overrides_path = ONEKS_PROVIDER_OVERRIDES_PATH)
+            validate_provider_contracts!
+            raise "Unqualified CAPONE metadata override version #{ONEKS_CAPONE_VERSION}" unless ONEKS_CAPONE_VERSION == '0.1.8'
+            raise 'Provider overrides path must be absolute' unless overrides_path.to_s.start_with?('/')
+
+            metadata = {
+                'apiVersion' => 'clusterctl.cluster.x-k8s.io/v1alpha3',
+                'kind' => 'Metadata',
+                'releaseSeries' => [
+                    {'major' => 0, 'minor' => 1, 'contract' => 'v1beta1'}
+                ]
+            }
+            validate_provider_metadata!(metadata, "opennebula:v#{ONEKS_CAPONE_VERSION}")
+
+            directory = File.join(
+                overrides_path,
+                'infrastructure-opennebula',
+                "v#{ONEKS_CAPONE_VERSION}"
+            )
+            FileUtils.mkdir_p(directory, :mode => 0o700)
+            File.chmod(0o700, directory)
+            path = File.join(directory, 'metadata.yaml')
+            File.open(path, File::WRONLY | File::CREAT | File::TRUNC, 0o600) do |file|
+                file.write(YAML.dump(metadata))
+            end
+            File.chmod(0o600, path)
+            path
+        end
+
+        def initialize_providers(kubeconfig, overrides_path: ONEKS_PROVIDER_OVERRIDES_PATH)
+            prepare_provider_overrides(overrides_path)
             Tempfile.create(['oneks-clusterctl-', '.yaml']) do |config|
                 config.write("cert-manager:\n  timeout: #{ONEKS_READY_TIMEOUT_SECONDS}s\n")
+                config.write("overridesFolder: #{overrides_path}\n")
                 config.flush
                 bash <<~SCRIPT
                     clusterctl init \
@@ -139,128 +243,214 @@ module Service
 
         def configure
             msg :info, 'OneKS::configure'
+            start_onegate_heartbeat
 
             begin
-                if ONEKS_CLUSTER_SPEC.nil? || ONEKS_CLUSTER_SPEC.strip.empty?
-                    msg :error, 'ONEKS_CLUSTER_SPEC is empty or not provided'
-                    onegate_vm_update ["#{ONEKS_STATE_KEY}=BOOTSTRAP_FAILURE"]
-                    exit 1
-                end
+                begin
+                    if ONEKS_CLUSTER_SPEC.nil? || ONEKS_CLUSTER_SPEC.strip.empty?
+                        msg :error, 'ONEKS_CLUSTER_SPEC is empty or not provided'
+                        report_onegate_state('BOOTSTRAP_FAILURE', 'EMPTY_CLUSTER_SPEC')
+                        exit 1
+                    end
 
-                msg :info, 'Start Management Cluster'
-                onegate_vm_update ["#{ONEKS_STATE_KEY}=PROVISIONING_MGMT"]
-                unless bash <<~SCRIPT
-                    umask 077
-                    if ! kind get clusters | grep -qx kind; then
-                        kind create cluster --image #{ONEKS_KIND_IMAGE} --wait 600s
-                    else
-                        podman start kind-control-plane
-                    fi
-                    kind get kubeconfig > #{ONEKS_MGMT_KUBECONFIG_PATH}
-                SCRIPT
-                    msg :error, 'Failed to start Management Cluster'
-                    onegate_vm_update ["#{ONEKS_STATE_KEY}=PROVISIONING_FAILURE"]
-                    exit 1
-                end
-
-                initialize_providers(ONEKS_MGMT_KUBECONFIG_PATH)
-
-                msg :info, 'Deploy Workload Cluster'
-                onegate_vm_update ["#{ONEKS_STATE_KEY}=PROVISIONING_CP"]
-                success = begin_retry?(30, 10) do
-                    # The specification contains ONE_AUTH. Never interpolate it into a traced shell.
-                    _out, _err, status = Open3.capture3(
-                        'kubectl', 'apply', '--kubeconfig', ONEKS_MGMT_KUBECONFIG_PATH, '-f', '-',
-                        :stdin_data => Base64.strict_decode64(ONEKS_CLUSTER_SPEC)
-                    )
-                    raise 'kubectl apply failed; specification and diagnostics withheld' unless status.success?
-                end
-
-                unless success
-                    msg :error, 'Failed to deploy Workload Cluster'
-                    onegate_vm_update ["#{ONEKS_STATE_KEY}=PROVISIONING_FAILURE"]
-                    exit 1
-                end
-
-                msg :info, 'Wait for Workload Cluster to be ready'
-                unless bash <<~SCRIPT
-                    kubectl wait \
-                        --for=condition=ControlPlaneAvailable \
-                        cluster/#{ONEKS_CLUSTER_NAME} \
-                        --timeout="$(( \
-                        $(kubectl get RKE2ControlPlane #{ONEKS_CLUSTER_NAME} \
-                            -o jsonpath='{.spec.replicas}' \
-                            --kubeconfig #{ONEKS_MGMT_KUBECONFIG_PATH}) * #{ONEKS_READY_TIMEOUT_SECONDS} \
-                        ))s" \
-                        --kubeconfig #{ONEKS_MGMT_KUBECONFIG_PATH}
-                SCRIPT
-                    msg :error, 'Workload Cluster is not ready'
-                    onegate_vm_update ["#{ONEKS_STATE_KEY}=PROVISIONING_FAILURE"]
-                    exit 1
-                end
-            rescue StandardError => e
-                msg :error, "Unexpected error: #{e.message}"
-                onegate_vm_update ["#{ONEKS_STATE_KEY}=PROVISIONING_FAILURE"]
-                exit 1
-            end
-
-            begin
-                onegate_vm_update ["#{ONEKS_STATE_KEY}=PIVOTING_CLUSTER"]
-                msg :info, 'Retrieve Workload Cluster Kubeconfig'
-                unless bash <<~SCRIPT
-                    umask 077
-                    clusterctl get kubeconfig #{ONEKS_CLUSTER_NAME} \
-                    --kubeconfig #{ONEKS_MGMT_KUBECONFIG_PATH} > #{ONEKS_WKLD_KUBECONFIG_PATH}
-                SCRIPT
-                    msg :error, 'Failed to retrieve Workload Cluster Kubeconfig'
-                    onegate_vm_update ["#{ONEKS_STATE_KEY}=PIVOTING_FAILURE"]
-                    exit 1
-                end
-
-                # API availability precedes CNI readiness. Provider webhooks need pod networking.
-                msg :info, 'Wait for workload node networking before installing providers'
-                bash <<~SCRIPT
-                    kubectl wait nodes --all --for=condition=Ready \
-                        --timeout=#{ONEKS_READY_TIMEOUT_SECONDS}s \
-                        --kubeconfig #{ONEKS_WKLD_KUBECONFIG_PATH}
-                SCRIPT
-
-                unless ONEKS_CNI_DAEMONSET.empty?
-                    _out, _err, status = Open3.capture3(
-                        'kubectl', '--kubeconfig', ONEKS_WKLD_KUBECONFIG_PATH,
-                        'rollout', 'status', "daemonset/#{ONEKS_CNI_DAEMONSET}",
-                        '-n', 'kube-system', "--timeout=#{ONEKS_READY_TIMEOUT_SECONDS}s"
-                    )
-                    raise 'Workload CNI did not become available' unless status.success?
-                end
-
-                msg :info, 'Initialize CAPI on Workload Cluster'
-                initialize_providers(ONEKS_WKLD_KUBECONFIG_PATH)
-
-                msg :info, 'Move CAPI objects to Workload Cluster'
-                success = begin_retry?(30, 10) do
-                    puts bash <<~SCRIPT
-                        clusterctl -v=4 move \
-                        --kubeconfig #{ONEKS_MGMT_KUBECONFIG_PATH} \
-                        --to-kubeconfig #{ONEKS_WKLD_KUBECONFIG_PATH}
+                    msg :info, 'Start Management Cluster'
+                    report_onegate_state('PROVISIONING_MGMT')
+                    unless bash <<~SCRIPT
+                        umask 077
+                        if ! kind get clusters | grep -qx kind; then
+                            kind create cluster --image #{ONEKS_KIND_IMAGE} --wait 600s
+                        else
+                            podman start kind-control-plane
+                        fi
+                        kind get kubeconfig > #{ONEKS_MGMT_KUBECONFIG_PATH}
                     SCRIPT
-                end
+                        msg :error, 'Failed to start Management Cluster'
+                        report_onegate_state('PROVISIONING_FAILURE', 'MGMT_CLUSTER_START_FAILED')
+                        exit 1
+                    end
 
-                unless success
-                    msg :error, 'Failed to move CAPI objects to Workload Cluster'
-                    onegate_vm_update ["#{ONEKS_STATE_KEY}=PIVOTING_FAILURE"]
+                    begin
+                        wait_for_management_api(ONEKS_MGMT_KUBECONFIG_PATH)
+                    rescue StandardError => e
+                        msg :error, "Management Kubernetes API readiness failed: #{e.class}: #{e.message}"
+                        report_onegate_state('PROVISIONING_FAILURE', 'MGMT_API_NOT_READY')
+                        exit 1
+                    end
+
+                    begin
+                        initialize_providers(ONEKS_MGMT_KUBECONFIG_PATH)
+                    rescue StandardError => e
+                        msg :error, "Management provider initialization failed: #{e.class}: #{e.message}"
+                        report_onegate_state('PROVISIONING_FAILURE', 'MGMT_PROVIDER_INIT_FAILED')
+                        exit 1
+                    end
+
+                    msg :info, 'Deploy Workload Cluster'
+                    report_onegate_state('PROVISIONING_CP')
+                    success = begin_retry?(30, 10) do
+                        # The specification contains ONE_AUTH. Never interpolate it into a traced shell.
+                        _out, _err, status = Open3.capture3(
+                            'kubectl', 'apply', '--kubeconfig', ONEKS_MGMT_KUBECONFIG_PATH, '-f', '-',
+                            :stdin_data => Base64.strict_decode64(ONEKS_CLUSTER_SPEC)
+                        )
+                        raise 'kubectl apply failed; specification and diagnostics withheld' unless status.success?
+                    end
+
+                    unless success
+                        msg :error, 'Failed to deploy Workload Cluster'
+                        report_onegate_state('PROVISIONING_FAILURE', 'WORKLOAD_APPLY_FAILED')
+                        exit 1
+                    end
+
+                    msg :info, 'Wait for Workload Cluster to be ready'
+                    unless bash <<~SCRIPT
+                        kubectl wait \
+                            --for=condition=ControlPlaneAvailable \
+                            cluster/#{ONEKS_CLUSTER_NAME} \
+                            --timeout="$(( \
+                            $(kubectl get RKE2ControlPlane #{ONEKS_CLUSTER_NAME} \
+                                -o jsonpath='{.spec.replicas}' \
+                                --kubeconfig #{ONEKS_MGMT_KUBECONFIG_PATH}) * #{ONEKS_READY_TIMEOUT_SECONDS} \
+                            ))s" \
+                            --kubeconfig #{ONEKS_MGMT_KUBECONFIG_PATH}
+                    SCRIPT
+                        msg :error, 'Workload Cluster is not ready'
+                        report_onegate_state('PROVISIONING_FAILURE', 'CONTROL_PLANE_TIMEOUT')
+                        exit 1
+                    end
+                rescue StandardError => e
+                    msg :error, "Unexpected error: #{e.message}"
+                    report_onegate_state('PROVISIONING_FAILURE', 'PROVISIONING_EXCEPTION')
                     exit 1
                 end
-                onegate_vm_update ["#{ONEKS_STATE_KEY}=RUNNING"]
-            rescue StandardError => e
-                msg :error, "Unexpected error: #{e.message}"
-                onegate_vm_update ["#{ONEKS_STATE_KEY}=PIVOTING_FAILURE"]
-                exit 1
+
+                begin
+                    report_onegate_state('PIVOTING_CLUSTER')
+                    msg :info, 'Retrieve Workload Cluster Kubeconfig'
+                    unless bash <<~SCRIPT
+                        umask 077
+                        clusterctl get kubeconfig #{ONEKS_CLUSTER_NAME} \
+                        --kubeconfig #{ONEKS_MGMT_KUBECONFIG_PATH} > #{ONEKS_WKLD_KUBECONFIG_PATH}
+                    SCRIPT
+                        msg :error, 'Failed to retrieve Workload Cluster Kubeconfig'
+                        report_onegate_state('PIVOTING_FAILURE', 'KUBECONFIG_RETRIEVAL_FAILED')
+                        exit 1
+                    end
+
+                    # API availability precedes CNI readiness. Provider webhooks need pod networking.
+                    msg :info, 'Wait for workload node networking before installing providers'
+                    bash <<~SCRIPT
+                        kubectl wait nodes --all --for=condition=Ready \
+                            --timeout=#{ONEKS_READY_TIMEOUT_SECONDS}s \
+                            --kubeconfig #{ONEKS_WKLD_KUBECONFIG_PATH}
+                    SCRIPT
+
+                    unless ONEKS_CNI_DAEMONSET.empty?
+                        _out, _err, status = Open3.capture3(
+                            'kubectl', '--kubeconfig', ONEKS_WKLD_KUBECONFIG_PATH,
+                            'rollout', 'status', "daemonset/#{ONEKS_CNI_DAEMONSET}",
+                            '-n', 'kube-system', "--timeout=#{ONEKS_READY_TIMEOUT_SECONDS}s"
+                        )
+                        raise 'Workload CNI did not become available' unless status.success?
+                    end
+
+                    msg :info, 'Initialize CAPI on Workload Cluster'
+                    begin
+                        initialize_providers(ONEKS_WKLD_KUBECONFIG_PATH)
+                    rescue StandardError => e
+                        msg :error, "Workload provider initialization failed: #{e.class}: #{e.message}"
+                        report_onegate_state('PIVOTING_FAILURE', 'WKLD_PROVIDER_INIT_FAILED')
+                        exit 1
+                    end
+
+                    msg :info, 'Move CAPI objects to Workload Cluster'
+                    success = begin_retry?(30, 10) do
+                        puts bash <<~SCRIPT
+                            clusterctl -v=4 move \
+                            --kubeconfig #{ONEKS_MGMT_KUBECONFIG_PATH} \
+                            --to-kubeconfig #{ONEKS_WKLD_KUBECONFIG_PATH}
+                        SCRIPT
+                    end
+
+                    unless success
+                        msg :error, 'Failed to move CAPI objects to Workload Cluster'
+                        report_onegate_state('PIVOTING_FAILURE', 'CAPI_MOVE_FAILED')
+                        exit 1
+                    end
+                    report_onegate_state('RUNNING')
+                rescue StandardError => e
+                    msg :error, "Unexpected error: #{e.message}"
+                    report_onegate_state('PIVOTING_FAILURE', 'PIVOT_EXCEPTION')
+                    exit 1
+                end
+            ensure
+                stop_onegate_heartbeat
             end
         end
 
         def bootstrap
             msg :info, 'Capi::bootstrap'
+        end
+
+        # Phase transitions and periodic heartbeats use the VM's scoped OneGate
+        # context token. No Kubernetes/bootstrap secrets are reported.
+        def report_onegate_state(state, error_code = 'NONE')
+            @heartbeat_mutex ||= Mutex.new
+            @onegate_emit_mutex ||= Mutex.new
+            @heartbeat_mutex.synchronize do
+                @oneks_state = state
+                @oneks_error_code = error_code
+            end
+            emit_onegate_heartbeat
+        end
+
+        def start_onegate_heartbeat
+            @heartbeat_mutex = Mutex.new
+            @onegate_emit_mutex = Mutex.new
+            @heartbeat_cv = ConditionVariable.new
+            @heartbeat_seq = 0
+            @heartbeat_stop = false
+            @oneks_state = 'BOOTSTRAP_STARTING'
+            @oneks_error_code = 'NONE'
+            emit_onegate_heartbeat
+
+            @heartbeat_thread = Thread.new do
+                loop do
+                    should_stop = @heartbeat_mutex.synchronize do
+                        @heartbeat_cv.wait(@heartbeat_mutex, ONEKS_HEARTBEAT_INTERVAL_SECONDS)
+                        @heartbeat_stop
+                    end
+                    break if should_stop
+                    emit_onegate_heartbeat
+                end
+            rescue StandardError => e
+                warn "OneKS heartbeat thread failed: #{e.class}: #{e.message}"
+            end
+        end
+
+        def stop_onegate_heartbeat
+            return unless @heartbeat_thread
+
+            @heartbeat_mutex.synchronize do
+                @heartbeat_stop = true
+                @heartbeat_cv.broadcast
+            end
+            @heartbeat_thread.join(5)
+            @heartbeat_thread.kill if @heartbeat_thread.alive?
+            @heartbeat_thread = nil
+        end
+
+        def emit_onegate_heartbeat
+            data = @heartbeat_mutex.synchronize do
+                @heartbeat_seq += 1
+                [
+                    "#{ONEKS_STATE_KEY}=#{@oneks_state}",
+                    "#{ONEKS_HEARTBEAT_AT_KEY}=#{Time.now.to_i}",
+                    "#{ONEKS_HEARTBEAT_SEQ_KEY}=#{@heartbeat_seq}",
+                    "#{ONEKS_ERROR_CODE_KEY}=#{@oneks_error_code || 'NONE'}"
+                ]
+            end
+            @onegate_emit_mutex.synchronize { onegate_vm_update(data) }
         end
 
     end
@@ -277,7 +467,16 @@ module Service
     end
 
     def onegate_vm_update(data)
-        bash "onegate vm update --data \"#{data.join('\n')}\""
+        _out, err, status = Open3.capture3(
+            'onegate', 'vm', 'update', '--data', data.join("\n")
+        )
+        unless status.success?
+            warn "OneGate VM update failed: #{err.to_s.lines.first.to_s.strip}"
+        end
+        status.success?
+    rescue StandardError => e
+        warn "OneGate VM update failed: #{e.class}: #{e.message}"
+        false
     end
 
 end

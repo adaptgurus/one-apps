@@ -9,7 +9,7 @@ packer {
 
 variable "appliance_name" {
   # e.g.: debian13
-  type    = string
+  type = string
 }
 
 variable "distro" {
@@ -19,7 +19,7 @@ variable "distro" {
 
 variable "version" {
   # e.g.: 13
-  type    = string
+  type = string
 }
 
 variable "arch" {
@@ -28,7 +28,7 @@ variable "arch" {
 }
 
 variable "command_format" {
-  type = string
+  type    = string
   default = "sudo -iu root {{.Vars}} bash {{.Path}}"
 }
 
@@ -43,6 +43,16 @@ variable "output_dir" {
 variable "headless" {
   type    = bool
   default = false
+}
+
+variable "layersentry_rke2_airgap" {
+  type    = bool
+  default = false
+}
+
+variable "qemu_binary_override" {
+  type    = string
+  default = ""
 }
 
 variable "arch_vars" {

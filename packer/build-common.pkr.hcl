@@ -20,6 +20,7 @@ build {
     environment_vars = [
       "DIST_VER=${var.version}",
       "DIST_ARCH=${var.arch}",
+      "LAYERSENTRY_RKE2_AIRGAP=${var.layersentry_rke2_airgap}",
     ]
     expect_disconnect = true
   }

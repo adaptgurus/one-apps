@@ -5,7 +5,10 @@ test "$(id -u)" = 0
 case "$(cat /etc/alpine-release)" in 3.24.*) ;; *) exit 1 ;; esac
 src=$(cd "$(dirname "$0")/../.." && pwd)
 test ! -e /etc/one-appliance/service.d/OneKS
-apk add bash curl ruby podman iptables ip6tables
+apk add bash curl ruby ruby-base64 podman iptables ip6tables
+# Alpine packages Ruby's bundled base64 gem separately. Load the actual appliance
+# before installing service hooks or starting any build-time container services.
+ruby -r "$src/appliances/OneKS/main.rb" -e 'Service::OneKS.validate_provider_contracts!'
 rc-update add cgroups boot
 rc-service cgroups start
 rc-update add podman boot

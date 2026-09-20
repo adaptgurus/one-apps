@@ -1,0 +1,100 @@
+name: LayerSentry OneKS Day2
+
+on:
+  push:
+    branches:
+      - layersentry/p1-rke2-day2-production-20260913
+  pull_request:
+    branches:
+      - layersentry/p1-rke2-provisioning
+      - layersentry/p1-rke2-day2-production-20260913
+    paths:
+      - 'appliances/OneKS/**'
+      - 'appliances/lib/helpers.rb'
+      - 'appliances/service.rb'
+      - 'packer/service_OneKS/**'
+      - 'packer/rocky/**'
+      - 'packer/layersentry-poc/**'
+      - 'packer/build.sh'
+      - 'packer/make-cloud-init-iso.sh'
+      - 'packer/build-common.pkr.hcl'
+      - 'packer/vars-common.pkr.hcl'
+      - '.github/workflows/layersentry-oneks-day2.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  alpine-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      ALPINE_TEST_IMAGE: alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate dependency probe syntax
+        run: sh -n packer/service_OneKS/test-alpine-runtime.sh
+      - name: Load real OneKS with the Alpine builder package set
+        run: |
+          set -euo pipefail
+          docker pull "$ALPINE_TEST_IMAGE"
+          image=$(docker image inspect "$ALPINE_TEST_IMAGE" --format '{{.Id}}')
+          docker image inspect "$ALPINE_TEST_IMAGE" --format '{{json .RepoDigests}}'
+          docker run --rm --pull=never --security-opt=no-new-privileges \
+            -v "$GITHUB_WORKSPACE:/src:ro" -w /src "$image" \
+            sh packer/service_OneKS/test-alpine-runtime.sh
+  seed:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+      - run: gem install rspec
+      - name: Create OpenNebula context fixture
+        run: |
+          sudo install -d -m 0755 /run/one-context
+          sudo install -m 0644 /dev/null /run/one-context/one_env
+      - name: Syntax
+        run: |
+          ruby -c appliances/OneKS/config.rb
+          ruby -c appliances/OneKS/main.rb
+          ruby -c appliances/OneKS/tests.rb
+          ruby -c appliances/OneKS/heartbeat_tests.rb
+          ruby -c appliances/OneKS/provider_compatibility_tests.rb
+          bash -n packer/service_OneKS/build-opennebula.sh
+          sh -n packer/service_OneKS/test-alpine-runtime.sh
+          bash -n packer/service_OneKS/82-configure-context.sh
+          grep -q 'qemu-guest-agent restart' packer/service_OneKS/82-configure-context.sh
+          grep -q 'OneKS early diagnostics before long-running configure' packer/service_OneKS/82-configure-context.sh
+          bash -n packer/make-cloud-init-iso.sh
+          bash -n packer/rocky/90-custom-scripts/95-layersentry-rke2-airgap.sh
+          bash -n packer/layersentry-poc/build-rocky-rke2-airgap.sh
+          bash -n packer/layersentry-poc/test-rocky-rke2-airgap.sh
+      - name: OneKS appliance regression tests
+        run: |
+          rspec --format documentation \
+            appliances/OneKS/tests.rb \
+            appliances/OneKS/heartbeat_tests.rb \
+            appliances/OneKS/provider_compatibility_tests.rb
+      - name: Real clusterctl CAPONE override qualification
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            https://github.com/kubernetes-sigs/cluster-api/releases/download/v1.13.5/clusterctl-linux-amd64 \
+            -o /tmp/clusterctl
+          echo '975e697ba4cb62f148e3709b6b102ed2c045d6c77f1fd20fd0d8cd328a22a0b9  /tmp/clusterctl' \
+            | sha256sum -c -
+          chmod 0700 /tmp/clusterctl
+          override_dir="$(mktemp -d)"
+          OVERRIDE_DIR="$override_dir" ruby -r ./appliances/OneKS/main -e \
+            'Service::OneKS.prepare_provider_overrides(ENV.fetch("OVERRIDE_DIR"))'
+          printf 'overridesFolder: %s\n' "$override_dir" > /tmp/clusterctl-qualification.yaml
+          /tmp/clusterctl generate provider \
+            --config /tmp/clusterctl-qualification.yaml \
+            --infrastructure opennebula:v0.1.8 \
+            --raw > /tmp/capone-components.yaml
+          test -s /tmp/capone-components.yaml
+          grep -q 'kind: Deployment' /tmp/capone-components.yaml
+      - name: Rocky RKE2 air-gap source checks
+        run: packer/layersentry-poc/test-rocky-rke2-airgap.sh

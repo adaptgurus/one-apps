@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 require 'rspec'
+require 'tmpdir'
 require_relative 'main'
 include Service
 
@@ -60,18 +61,23 @@ RSpec.describe Service::OneKS do
     expect(combined).not_to include('kind create cluster', 'get kubeconfig', 'clusterctl init')
   end
   it 'pins all three native provider versions during initialization' do
-    script = nil
-    timeout_config = nil
-    allow(described_class).to receive(:bash) do |value|
-      script = value
-      timeout_config = File.read(value.match(/--config (\S+)/)[1])
-      ''
+    Dir.mktmpdir do |dir|
+      script = nil
+      timeout_config = nil
+      allow(described_class).to receive(:bash) do |value|
+        script = value
+        timeout_config = File.read(value.match(/--config (\S+)/)[1])
+        ''
+      end
+      expect(described_class).to receive(:qualify_provider_startup).with('/run/qualification.kubeconfig')
+      described_class.initialize_providers('/run/qualification.kubeconfig', overrides_path: dir)
+      expect(timeout_config).to include(
+        "cert-manager:\n  timeout: #{ONEKS_READY_TIMEOUT_SECONDS}s\n",
+        "overridesFolder: #{dir}\n"
+      )
+      expect(script).to include('--core=cluster-api:v1.13.5', '--bootstrap=rke2:v0.25.2',
+                               '--control-plane=rke2:v0.25.2', '--infrastructure=opennebula:v0.1.8')
     end
-    expect(described_class).to receive(:qualify_provider_startup).with('/run/qualification.kubeconfig')
-    described_class.initialize_providers('/run/qualification.kubeconfig')
-    expect(timeout_config).to eq("cert-manager:\n  timeout: #{ONEKS_READY_TIMEOUT_SECONDS}s\n")
-    expect(script).to include('--core=cluster-api:v1.13.5', '--bootstrap=rke2:v0.25.2',
-                             '--control-plane=rke2:v0.25.2', '--infrastructure=opennebula:v0.1.8')
   end
   it 'passes the specification through stdin without shell interpolation' do
     spec = "apiVersion: v1\nkind: Secret\nstringData:\n  ONE_AUTH: fixture-secret\n"
@@ -81,6 +87,9 @@ RSpec.describe Service::OneKS do
     allow(described_class).to receive(:bash) { |script| commands << script; '' }
     allow(described_class).to receive(:onegate_vm_update)
     allow(described_class).to receive(:qualify_provider_startup)
+    allow(described_class).to receive(:wait_for_management_api)
+      .with(ONEKS_MGMT_KUBECONFIG_PATH).and_return(true)
+    allow(described_class).to receive(:prepare_provider_overrides).and_return('/tmp/provider-metadata.yaml')
     allow(described_class).to receive(:begin_retry?).and_yield.and_return(true)
     status = double('status', success?: true)
     expect(Open3).to receive(:capture3).with('kubectl', 'apply', '--kubeconfig',
