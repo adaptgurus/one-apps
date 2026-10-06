@@ -76,7 +76,7 @@ module Service
                     vmid: vm.dig('VM', 'ID').to_s,
                     name: controllers.length == 1 && !slurm_ha_enabled? ?
                           OneSlurm::Slurm::LEGACY_CONTROLLER_NAME :
-                          "slurm-one-controller-#{index + 1}",
+                          "slurm-one-controller-#{vm.dig('VM', 'ID')}",
                     ip: ip,
                     primary: index.zero?
                 }
