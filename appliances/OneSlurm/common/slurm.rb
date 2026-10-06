@@ -162,7 +162,7 @@ module OneSlurm
                 EnvironmentFile=-/etc/default/slurmd
                 RuntimeDirectory=slurm
                 RuntimeDirectoryMode=0755
-                ExecStart=/usr/sbin/slurmd --systemd --conf-server slurm-one-controller:6817 -N #{hostname} -Z --conf "#{conf}"
+                ExecStart=/usr/sbin/slurmd --systemd --conf-server #{conf_server} -N #{hostname} -Z --conf "#{conf}"
                 ExecReload=/bin/kill -HUP $MAINPID
                 KillMode=process
                 LimitNOFILE=131072
