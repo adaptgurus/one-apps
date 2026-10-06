@@ -153,7 +153,11 @@ module Service
             # Wait and start the slurmd service
             sleep 5
             msg(:info, 'Starting slurmd and registering with controller')
-            write_slurmd_unit(hostname, controller_hosts: controller_names)
+            write_slurmd_unit(
+                hostname,
+                controller_hosts: controller_names,
+                system_reserved_memory_mb: ONEAPP_SLURM_SYSTEM_RESERVED_MEMORY_MB
+            )
             msg(:info, 'slurmd started')
 
             # Publish the Slurm node name so the controller reconciler has a
