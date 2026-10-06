@@ -242,7 +242,7 @@ module Service
                             vmid: vm.dig('VM', 'ID').to_s,
                             name: controller_vms.length == 1 ?
                                   OneSlurm::Slurm::LEGACY_CONTROLLER_NAME :
-                                  "slurm-one-controller-#{index + 1}",
+                                  "slurm-one-controller-#{vm.dig('VM', 'ID')}",
                             ip: ip
                         }
                     end
