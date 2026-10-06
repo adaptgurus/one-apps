@@ -249,28 +249,37 @@ module Service
                             'ldap' => {
                                 'url' => user_template['LDAP_URL'].to_s,
                                 'domain' => user_template['LDAP_DOMAIN'].to_s,
-                                'bind_user' => user_template['LDAP_BIND_USER'].to_s,
-                                'bind_password' => user_template['LDAP_BIND_PASSWORD'].to_s
+                                'bind_user' => ONEAPP_LDAP_BIND_USER.to_s,
+                                'bind_password' => ONEAPP_LDAP_BIND_PASSWORD.to_s
                             }
                         }
                     end.sort_by { |controller| controller['vmid'].to_i }
 
+                    configured_key = ONEAPP_SLURM_MUNGE_KEY_BASE64.to_s.strip
                     ready = controllers.select do |controller|
-                        controller['ready'] && !controller['ip'].empty? && !controller['key'].empty?
+                        has_key = !configured_key.empty? || !controller['key'].empty?
+                        controller['ready'] && !controller['ip'].empty? && has_key
                     end
 
                     unless ready.empty?
-                        keys = ready.map { |controller| controller['key'] }.uniq
-                        if keys.length != 1
+                        published_keys = ready.map { |controller| controller['key'] }
+                                              .reject(&:empty?).uniq
+                        if published_keys.length > 1
                             raise 'FATAL: READY Slurm controllers published inconsistent MUNGE keys'
                         end
+                        if !configured_key.empty? && !published_keys.empty? &&
+                           published_keys.first != configured_key
+                            raise 'FATAL: Published MUNGE key conflicts with configured cluster secret'
+                        end
+                        key = configured_key.empty? ? published_keys.first : configured_key
+                        raise 'FATAL: No usable MUNGE key available for worker bootstrap' if key.to_s.empty?
 
                         endpoints = ready.map do |controller|
                             { 'vmid' => controller['vmid'],
                               'name' => controller['name'],
                               'ip' => controller['ip'] }
                         end
-                        return [endpoints, keys.first, ready.first['ldap']]
+                        return [endpoints, key, ready.first['ldap']]
                     end
 
                     msg(:warn, "No READY Slurm controller with complete coordination data; retrying in #{seconds}s...")
