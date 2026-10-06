@@ -1,0 +1,32 @@
+---
+name: OneSlurm
+on:
+  pull_request:
+    branches:
+      - '**'
+    paths:
+      - 'appliances/OneSlurm/**'
+      - 'packer/service_SlurmController/**'
+      - 'packer/service_SlurmWorker/**'
+      - '.github/workflows/oneslurm.yml'
+
+jobs:
+  source-and-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+      - run: gem install rspec
+      - name: Ruby syntax
+        run: |
+          find appliances/OneSlurm -name '*.rb' -print0 | xargs -0 -n1 ruby -c
+      - name: Shell syntax
+        run: |
+          find appliances/OneSlurm -type f -perm -111 -print0 | xargs -0 -r -n1 bash -n
+      - name: Production profile YAML
+        run: |
+          ruby -e "require 'yaml'; YAML.safe_load_file('appliances/OneSlurm/production/service-template.yaml', aliases: true)"
+      - name: OneSlurm unit tests
+        run: rspec appliances/OneSlurm/**/*_spec.rb

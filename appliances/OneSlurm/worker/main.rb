@@ -20,12 +20,8 @@ require_relative '../common/slurm'
 require_relative '../common/infiniband'
 require_relative 'config'
 
-# Base module for OpenNebula services
 module Service
-
-    # SlurmWorker service implementation
     module SlurmWorker
-
         extend self
 
         include OneSlurm::Ldap
@@ -57,7 +53,6 @@ module Service
         end
 
         def install_nvidia_packages
-            # Use Ubuntu's packaged server-open driver for recent datacenter GPUs.
             bash <<~SCRIPT
                 export DEBIAN_FRONTEND=noninteractive
                 apt update
@@ -70,32 +65,13 @@ module Service
         def configure
             msg(:info, 'SlurmWorker::configure')
 
-            # Discover the controller and coordination data through OneGate.
-            controller_ip, munge_key_b64, ldap = discover_controller
+            controllers, munge_key_b64, ldap = discover_controllers
+            endpoints = controllers.map { |controller| "#{controller[:ip]}:6817" }
+            reachable = wait_for_any_controller(endpoints)
+            msg(:info, "Using reachable Slurm controller #{reachable}")
 
-            msg(:info, "Controller IP specified: #{controller_ip}")
-
-            # Check if the controller is reachable on the slurmctld port, with retries
-            msg(:info, "Checking for controller reachability at #{controller_ip}:6817...")
-            port_open = false
-            5.times do |i|
-                if tcp_port_open?(controller_ip, 6817)
-                    port_open = true
-                    break
-                end
-                msg(:warn, "Controller not reachable, retrying in 10s (#{i + 1}/5)...")
-                sleep 10
-            end
-
-            unless port_open
-                raise "FATAL: Cannot connect to Slurm controller at #{controller_ip}:6817 after 5 attempts."
-            end
-            msg(:info, 'Successfully connected to Slurm controller port.')
-
-            # Configure hostname
             if ENV['SET_HOSTNAME'].to_s.empty?
                 msg(:info, 'SET_HOSTNAME not set, configuring default hostname...')
-
                 vm_id = nil
                 10.times do |i|
                     begin
@@ -103,7 +79,7 @@ module Service
                         vm_info_json = bash('onegate vm show -j')
                         vm_info = JSON.parse(vm_info_json)
                         vm_id = vm_info['VM']['ID']
-                        break # Success, exit retry loop
+                        break
                     rescue StandardError => e
                         if i + 1 < 10
                             sleep 15
@@ -119,15 +95,12 @@ module Service
             end
 
             hostname = Socket.gethostname.split('.').first
+            ip = Socket.ip_address_list.find { |a| a.ipv4? && !a.ipv4_loopback? }.ip_address
 
-            # Add worker and controller to /etc/hosts
-            ip = Socket.ip_address_list
-                       .find { |a| a.ipv4? && !a.ipv4_loopback? }
-                       .ip_address
-            hosts_entries = [
-                "#{ip}\t#{hostname}",
-                "#{controller_ip}\tslurm-one-controller"
-            ]
+            hosts_entries = ["#{ip}\t#{hostname}"]
+            controllers.each do |controller|
+                hosts_entries << "#{controller[:ip]}\t#{controller[:name]}"
+            end
             hosts = File.read('/etc/hosts')
             File.open('/etc/hosts', 'a') do |f|
                 hosts_entries.each do |hosts_entry|
@@ -144,27 +117,33 @@ module Service
                 msg(:info, 'InfiniBand support disabled, skipping IPoIB configuration')
             end
 
-            # Decode and install the munge key from the controller
             install_munge_key(munge_key_b64)
 
-            # Wait and start the slurmd service
             sleep 5
-            msg(:info, 'Starting slurmd and registering with controller')
-            write_slurmd_unit(hostname)
+            msg(:info, 'Starting slurmd and registering with controller set')
+            write_slurmd_unit(hostname, controller_servers: endpoints)
             msg(:info, 'slurmd started')
 
-            # Publish the Slurm node name so the controller reconciler has a
-            # reliable VM -> node mapping (avoids replicating SET_HOSTNAME
-            # sanitization). Best-effort: discovery already succeeded above.
             publish_node_name(hostname)
-
-            # Install the shutdown hook so a graceful scale-down removes this
-            # node from the controller immediately.
+            install_scale_in_guard
             install_self_drain_hook
-
             configure_worker_ldap(ldap)
 
             msg(:info, 'Configuration completed successfully')
+        end
+
+        def wait_for_any_controller(endpoints, attempts: 10, delay: 10)
+            attempts.times do |attempt|
+                endpoints.each do |endpoint|
+                    host, port = endpoint.split(':', 2)
+                    return endpoint if tcp_port_open?(host, Integer(port || '6817', 10))
+                end
+
+                raise "FATAL: No Slurm controller reachable at #{endpoints.join(',')}" if attempt + 1 == attempts
+
+                msg(:warn, "No Slurm controller reachable; retrying in #{delay}s (#{attempt + 1}/#{attempts})")
+                sleep delay
+            end
         end
 
         def publish_node_name(hostname)
@@ -176,18 +155,49 @@ module Service
             msg(:warn, "Could not publish Slurm node name to OneGate: #{e.message}")
         end
 
+        def install_scale_in_guard
+            guard = <<~'SCRIPT'
+                #!/bin/bash
+                set -euo pipefail
+                export SLURM_CONF=/run/slurm/conf/slurm.conf
+                [ -f "$SLURM_CONF" ] || export SLURM_CONF=/etc/slurm/slurm.conf
+                NODE="${1:-$(hostname -s)}"
+
+                if ! scontrol show node "$NODE" >/dev/null 2>&1; then
+                    echo "UNKNOWN: Slurm node '$NODE' is not authoritative/reachable" >&2
+                    exit 2
+                fi
+
+                ACTIVE=$(squeue -h -w "$NODE" -t RUNNING,COMPLETING -o '%i' 2>/dev/null || true)
+                if [ -n "$ACTIVE" ]; then
+                    echo "BLOCKED: Slurm node '$NODE' still has active allocations: $ACTIVE" >&2
+                    exit 75
+                fi
+
+                echo "SAFE: Slurm node '$NODE' has no RUNNING/COMPLETING allocations"
+            SCRIPT
+            file '/usr/local/sbin/oneslurm-can-remove-worker', guard,
+                 mode: 'u=rwx,go=rx', overwrite: true
+        end
+
         def install_self_drain_hook
             msg(:info, 'Installing OneSlurm worker self-drain shutdown hook')
 
-            drain_script = <<~SCRIPT
+            drain_script = <<~'SCRIPT'
                 #!/bin/bash
-                # Remove this worker from the Slurm controller on graceful shutdown
-                # (e.g. OneFlow scale-down). Best-effort; the controller reconciler
-                # is the safety net for hard terminations.
+                set -u
                 export SLURM_CONF=/run/slurm/conf/slurm.conf
                 [ -f "$SLURM_CONF" ] || export SLURM_CONF=/etc/slurm/slurm.conf
                 NODE=$(hostname -s)
-                timeout 15 scontrol update NodeName="$NODE" State=DOWN Reason="oneflow scale-down" 2>/dev/null || true
+
+                if ! /usr/local/sbin/oneslurm-can-remove-worker "$NODE"; then
+                    timeout 15 scontrol update NodeName="$NODE" State=DRAIN \
+                        Reason="worker shutdown with active or unknown allocation state" 2>/dev/null || true
+                    exit 0
+                fi
+
+                timeout 15 scontrol update NodeName="$NODE" State=DRAIN \
+                    Reason="planned OneFlow scale-down" 2>/dev/null || true
                 timeout 15 scontrol delete NodeName="$NODE" 2>/dev/null || true
             SCRIPT
             file '/usr/local/sbin/oneslurm-self-drain.sh', drain_script,
@@ -214,45 +224,56 @@ module Service
             bash('systemctl enable --now oneslurm-self-drain.service')
         end
 
-        def discover_controller(retries = 20, seconds = 15)
-            msg(:info, 'Discovering Slurm controller through OneGate')
+        def discover_controllers(retries = 20, seconds = 15)
+            msg(:info, 'Discovering Slurm controllers through OneGate')
 
             retries.downto(0).each do |retry_num|
                 begin
-                    controller_vm = role_vm_show('controller')
-                    user_template = controller_vm.dig('VM', 'USER_TEMPLATE') || {}
+                    controller_vms = role_vms_show('controller').sort_by do |vm|
+                        Integer(vm.dig('VM', 'ID').to_s, 10)
+                    end
+                    raise 'No controller VMs found' if controller_vms.empty?
 
-                    ready = user_template['READY'] == 'YES'
-                    ip    = vm_nic_ipv4(controller_vm)
-                    key   = user_template['SLURM_MUNGE_KEY'].to_s
+                    controllers = controller_vms.each_with_index.map do |vm, index|
+                        ip = vm_nic_ipv4(vm)
+                        raise "Controller VM #{vm.dig('VM', 'ID')} has no IPv4" if ip.empty?
 
-                    if ready && !ip.empty? && !key.empty?
-                        # The controller is the authority for cluster LDAP and
-                        # publishes its effective config through OneGate. The
-                        # worker consumes only these values and ignores the
-                        # ONEAPP_LDAP_* context OneFlow injects into every role.
-                        ldap = {
-                            'url'           => user_template['LDAP_URL'].to_s,
-                            'domain'        => user_template['LDAP_DOMAIN'].to_s,
-                            'bind_user'     => user_template['LDAP_BIND_USER'].to_s,
-                            'bind_password' => user_template['LDAP_BIND_PASSWORD'].to_s
+                        {
+                            vmid: vm.dig('VM', 'ID').to_s,
+                            name: controller_vms.length == 1 ?
+                                  OneSlurm::Slurm::LEGACY_CONTROLLER_NAME :
+                                  "slurm-one-controller-#{vm.dig('VM', 'ID')}",
+                            ip: ip
                         }
-                        return [ip, key, ldap]
                     end
 
-                    msg(:warn, "Controller not ready yet (READY=#{user_template['READY']}), retrying in #{seconds}s...")
+                    primary_template = controller_vms.first.dig('VM', 'USER_TEMPLATE') || {}
+                    ready = primary_template['READY'] == 'YES'
+                    key = primary_template['SLURM_MUNGE_KEY'].to_s
+
+                    if ready && !key.empty?
+                        ldap = {
+                            'url' => primary_template['LDAP_URL'].to_s,
+                            'domain' => primary_template['LDAP_DOMAIN'].to_s,
+                            'bind_user' => primary_template['LDAP_BIND_USER'].to_s,
+                            'bind_password' => primary_template['LDAP_BIND_PASSWORD'].to_s
+                        }
+                        return [controllers, key, ldap]
+                    end
+
+                    msg(:warn, "Primary controller not ready yet (READY=#{primary_template['READY']}), retrying in #{seconds}s...")
                 rescue StandardError => e
                     msg(:warn, "OneGate controller discovery failed: #{e.message}. Retrying in #{seconds}s...")
                 end
 
-                raise 'FATAL: Could not discover Slurm controller through OneGate.' if retry_num.zero?
+                raise 'FATAL: Could not discover ready Slurm controller set through OneGate.' if retry_num.zero?
 
                 sleep seconds
             end
         end
 
         def configure_worker_ldap(ldap)
-            url    = ldap['url'].to_s
+            url = ldap['url'].to_s
             domain = ldap['domain'].to_s
 
             if url.empty? || domain.empty?
@@ -265,8 +286,13 @@ module Service
                 return
             end
 
-            msg(:info, 'Configuring SSSD LDAP client from OneGate metadata')
-            apply_sssd_ldap_client(url, domain, ldap['bind_user'].to_s, ldap['bind_password'].to_s)
+            bind_user = ONEAPP_LDAP_BIND_USER.to_s.strip
+            bind_password = ONEAPP_LDAP_BIND_PASSWORD.to_s
+            bind_user = ldap['bind_user'].to_s if bind_user.empty?
+            bind_password = ldap['bind_password'].to_s if bind_password.empty?
+
+            msg(:info, 'Configuring SSSD LDAP client from authoritative cluster metadata')
+            apply_sssd_ldap_client(url, domain, bind_user, bind_password)
             msg(:info, 'SSSD LDAP client configured successfully')
         end
 

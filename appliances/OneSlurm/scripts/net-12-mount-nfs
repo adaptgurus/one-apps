@@ -16,7 +16,6 @@
 # limitations under the License.                                             #
 #--------------------------------------------------------------------------- #
 
-# THIS IS A CONTEXTUALIZATION GUARD
 if [ "$1" != 'network' ] ; then
     exit 0
 fi
@@ -33,11 +32,10 @@ fi
 
 _exit_result=0
 
-# arg: context_var mountpoint
 mount_nfs_export() {
     local _var="$1"
     local _mountpoint="$2"
-    local _spec="${!_var}"
+    local _spec="${!_var:-}"
 
     if [[ -z "${_spec}" ]]; then
         return 0
@@ -57,7 +55,6 @@ mount_nfs_export() {
     fi
 
     echo "NFS: Mounting ${_host}:${_export} on ${_mountpoint}" >&2
-
     mkdir -p "${_mountpoint}"
 
     if ! mount -t nfs4 -o "${NFS_MOUNT_OPTIONS}" "${_host}:${_export}" "${_mountpoint}" ; then
@@ -75,6 +72,7 @@ case "${2:-configure}" in
     configure|reconfigure|force)
         mount_nfs_export ONEAPP_SLURM_NFS_HOME /home || _exit_result=1
         mount_nfs_export ONEAPP_SLURM_NFS_SCRATCH /scratch || _exit_result=1
+        mount_nfs_export ONEAPP_SLURM_NFS_STATE /var/lib/oneslurm/state || _exit_result=1
         ;;
     *)
         echo "NFS: Unknown action: ${2:-}" >&2
