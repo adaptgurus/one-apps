@@ -286,8 +286,13 @@ module Service
                 return
             end
 
-            msg(:info, 'Configuring SSSD LDAP client from OneGate metadata')
-            apply_sssd_ldap_client(url, domain, ldap['bind_user'].to_s, ldap['bind_password'].to_s)
+            bind_user = ONEAPP_LDAP_BIND_USER.to_s.strip
+            bind_password = ONEAPP_LDAP_BIND_PASSWORD.to_s
+            bind_user = ldap['bind_user'].to_s if bind_user.empty?
+            bind_password = ldap['bind_password'].to_s if bind_password.empty?
+
+            msg(:info, 'Configuring SSSD LDAP client from authoritative cluster metadata')
+            apply_sssd_ldap_client(url, domain, bind_user, bind_password)
             msg(:info, 'SSSD LDAP client configured successfully')
         end
 
