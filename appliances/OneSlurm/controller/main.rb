@@ -346,11 +346,13 @@ module Service
                 bash "onegate vm update --data LDAP_DOMAIN=#{ONEAPP_LDAP_DOMAIN}"
                 admin_user = ONEAPP_LDAP_ADMIN_USER.to_s.strip
                 bash "onegate vm update --data LDAP_ADMIN_USER=#{admin_user}" unless admin_user.empty?
-                bind_user = ONEAPP_LDAP_BIND_USER.to_s.strip
-                unless bind_user.empty?
-                    bash "onegate vm update --data LDAP_BIND_USER=#{bind_user}"
-                    bind_password = ONEAPP_LDAP_BIND_PASSWORD.to_s
-                    bash "onegate vm update --data LDAP_BIND_PASSWORD=#{bind_password}" unless bind_password.empty?
+                if truthy?(ONEAPP_SLURM_PUBLISH_LDAP_BIND_CREDENTIALS)
+                    bind_user = ONEAPP_LDAP_BIND_USER.to_s.strip
+                    unless bind_user.empty?
+                        bash "onegate vm update --data LDAP_BIND_USER=#{bind_user}"
+                        bind_password = ONEAPP_LDAP_BIND_PASSWORD.to_s
+                        bash "onegate vm update --data LDAP_BIND_PASSWORD=#{bind_password}" unless bind_password.empty?
+                    end
                 end
             end
             msg :info, 'Successfully updated OneGate with LDAP metadata'
