@@ -191,8 +191,7 @@ module OneSlurm
         end
 
         def gpu_count
-            stdout, _stderr, status = Open3.capture3('nvidia-smi --query-gpu=uuid' \
-                                                     ' --format=csv,noheader')
+            stdout, _stderr, status = Open3.capture3('nvidia-smi', '--query-gpu=uuid', '--format=csv,noheader')
             unless status.success?
                 msg(:warn, 'nvidia-smi command failed, assuming 0 GPUs')
                 return 0
