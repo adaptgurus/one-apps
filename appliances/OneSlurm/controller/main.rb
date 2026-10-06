@@ -19,12 +19,8 @@ require_relative '../common/slurm'
 require_relative '../common/infiniband'
 require_relative 'config'
 
-# Base module for OpenNebula services
 module Service
-
-    # SlurmController service implementation
     module SlurmController
-
         extend self
 
         include OneSlurm::Ldap
@@ -32,23 +28,18 @@ module Service
         include OneSlurm::Slurm
         include OneSlurm::Infiniband
 
-        DEPENDS_ON    = []
+        DEPENDS_ON = []
 
         def install
             msg :info, 'SlurmController::install'
-
-            # Install dependencies
             bash 'apt update && apt install munge libmunge-dev slurmctld slurm-client slurm-wlm-basic-plugins ldap-utils sssd sssd-ldap libnss-sss libpam-sss nfs-common -y'
             install_infiniband_packages
 
-            # Write cluster configuration
+            # Install-time config remains compatible with the single-controller
+            # image build. configure() rewrites it from authoritative OneFlow
+            # membership when the service starts.
             write_controller_slurm_config
-
-            # Enable service
             bash 'systemctl enable slurmctld'
-
-            # Bake the scale-down node reconciler (script + systemd units) into
-            # the image; the timer is enabled at configure time.
             install_node_reconciler
 
             msg :info, 'Installation completed successfully'
@@ -60,19 +51,114 @@ module Service
             install_controller_infiniband_packages
         end
 
-        # Writes the reconciler script and systemd service/timer units. The
-        # reconciler removes Slurm dynamic nodes whose worker VM is no longer
-        # part of the OneFlow service (scale-down / deletion).
+        def controller_topology
+            controllers = role_vms_show('controller').sort_by do |vm|
+                Integer(vm.dig('VM', 'ID').to_s, 10)
+            rescue ArgumentError
+                raise 'FATAL: Controller VM is missing a numeric OpenNebula VM ID'
+            end
+
+            if slurm_ha_enabled? && controllers.length < 2
+                raise 'FATAL: ONEAPP_SLURM_HA_ENABLE=YES requires at least two controller role VMs'
+            end
+            if !slurm_ha_enabled? && controllers.length != 1
+                raise 'FATAL: Multiple controller role VMs require ONEAPP_SLURM_HA_ENABLE=YES'
+            end
+
+            controllers.each_with_index.map do |vm, index|
+                ip = vm_nic_ipv4(vm)
+                raise "FATAL: Controller VM #{vm.dig('VM', 'ID')} has no IPv4 address" if ip.empty?
+
+                {
+                    vm: vm,
+                    vmid: vm.dig('VM', 'ID').to_s,
+                    name: controllers.length == 1 && !slurm_ha_enabled? ?
+                          OneSlurm::Slurm::LEGACY_CONTROLLER_NAME :
+                          "slurm-one-controller-#{index + 1}",
+                    ip: ip,
+                    primary: index.zero?
+                }
+            end
+        end
+
+        def current_vm_id
+            onegate_vm_show.dig('VM', 'ID').to_s
+        end
+
+        def local_controller(topology)
+            id = current_vm_id
+            controller = topology.find { |item| item[:vmid] == id }
+            raise "FATAL: Current VM #{id} is not present in controller role membership" unless controller
+
+            controller
+        end
+
+        def configure_controller_identity(topology, local)
+            current_hostname = Socket.gethostname.split('.').first
+            desired_hostname = local[:name]
+
+            if current_hostname != desired_hostname
+                msg :info, "Hostname is '#{current_hostname}', changing to '#{desired_hostname}'"
+                bash "hostnamectl set-hostname #{desired_hostname}"
+            end
+
+            hosts = File.read('/etc/hosts')
+            File.open('/etc/hosts', 'a') do |f|
+                topology.each do |controller|
+                    hosts_entry = "#{controller[:ip]}\t#{controller[:name]}"
+                    next if hosts.include?(hosts_entry)
+
+                    msg :info, "Adding '#{hosts_entry}' to /etc/hosts"
+                    f.puts hosts_entry
+                end
+            end
+        end
+
+        def validate_ha_identity_policy!(topology)
+            return unless topology.length > 1
+
+            if truthy?(ONEAPP_LDAP_ENABLE)
+                raise 'FATAL: Local slapd identity is not supported for HA OneSlurm. ' \
+                      'Use a qualified external LDAP/AD endpoint or disable LDAP.'
+            end
+
+            state_path = slurm_state_save_location
+            if state_path == OneSlurm::Slurm::DEFAULT_STATE_SAVE_LOCATION
+                raise 'FATAL: HA OneSlurm requires ONEAPP_SLURM_STATE_SAVE_LOCATION ' \
+                      'to point to durable shared storage mounted on every controller.'
+            end
+
+            raise "FATAL: Shared Slurm state path '#{state_path}' is not mounted" unless mountpoint?(state_path)
+        end
+
+        def mountpoint?(path)
+            _out, _err, status = Open3.capture3('mountpoint', '-q', path)
+            status.success?
+        rescue Errno::ENOENT
+            false
+        end
+
+        def wait_for_primary_coordination(primary, attempts: 40, delay: 5)
+            attempts.times do |i|
+                vm = onegate_vm_show(primary[:vmid])
+                template = vm.dig('VM', 'USER_TEMPLATE') || {}
+                key = template['SLURM_MUNGE_KEY'].to_s
+                ready = template['READY'].to_s == 'YES'
+                return [key, template] if ready && !key.empty?
+
+                raise 'FATAL: Primary controller did not publish coordination state' if i + 1 == attempts
+
+                msg :warn, "Primary controller coordination is not ready; retrying in #{delay}s (#{i + 1}/#{attempts})"
+                sleep delay
+            end
+        end
+
         def install_node_reconciler
             msg :info, 'Installing OneSlurm node reconciler'
 
             reconciler = <<~'RUBY'
                 #!/usr/bin/env ruby
                 # frozen_string_literal: true
-                # OneSlurm controller node reconciler.
-                # Deletes Slurm dynamic nodes whose worker VM has left the OneFlow
-                # service (scale-down / deletion). Drains instead of deleting when a
-                # stale node still has running jobs. Safe no-op for standalone deploys.
                 require 'json'
                 require 'open3'
 
@@ -85,7 +171,6 @@ module Service
                     puts "[oneslurm-reconcile] #{text}"
                 end
 
-                # 1. Live worker node names from OneGate service membership.
                 svc_out, ok = run(['onegate', '--json', 'service', 'show'])
                 unless ok
                     log 'OneGate service show failed or unavailable; skipping'
@@ -106,12 +191,7 @@ module Service
                     exit 0
                 end
 
-                # `service show` only embeds a VM summary (ID/NAME), so fetch each
-                # worker VM individually to read its published SLURM_NODENAME.
-                vmids = (worker_role['nodes'] || []).map do |n|
-                    n.dig('vm_info', 'VM', 'ID')
-                end.compact
-
+                vmids = (worker_role['nodes'] || []).map { |n| n.dig('vm_info', 'VM', 'ID') }.compact
                 live = []
                 vmids.each do |vmid|
                     out, ok = run(['onegate', '--json', 'vm', 'show', vmid.to_s])
@@ -127,26 +207,21 @@ module Service
                     live << name unless name.empty?
                 end
 
-                # Never act if we cannot resolve any live node names (avoids mass
-                # deletion before workers publish SLURM_NODENAME or on transient
-                # OneGate errors).
                 if live.empty?
                     log 'No live SLURM_NODENAME values resolved yet; skipping'
                     exit 0
                 end
 
-                # 2. Registered nodes + state from the controller.
                 nodes_out, ok = run(['scontrol', '-o', 'show', 'nodes'])
                 exit 0 unless ok
 
                 registered = {}
                 nodes_out.each_line do |line|
-                    name  = line[/NodeName=(\S+)/, 1]
+                    name = line[/NodeName=(\S+)/, 1]
                     state = line[/State=(\S+)/, 1].to_s
                     registered[name] = state if name
                 end
 
-                # 3. Stale = registered, not live, and currently down / not responding.
                 stale = registered.select do |name, state|
                     !live.include?(name) && state =~ /DOWN|NOT_RESPONDING/i
                 end.keys
@@ -156,16 +231,15 @@ module Service
                     exit 0
                 end
 
-                # 4. Delete stale nodes; drain (keep) if they still hold running jobs.
                 stale.each do |name|
-                    running, _ = run(['squeue', '-h', '-w', name, '-t', 'RUNNING', '-o', '%i'])
-                    if running.strip.empty?
+                    active, _ = run(['squeue', '-h', '-w', name, '-t', 'RUNNING,COMPLETING', '-o', '%i'])
+                    if active.strip.empty?
                         _, ok = run(['scontrol', 'delete', "NodeName=#{name}"])
                         log(ok ? "deleted stale node #{name}" : "failed to delete node #{name}")
                     else
                         _, ok = run(['scontrol', 'update', "NodeName=#{name}", 'State=DRAIN',
-                                     'Reason=removed from OneFlow service'])
-                        log(ok ? "drained node #{name} (still has running jobs)" : "failed to drain node #{name}")
+                                     'Reason=removed from OneFlow service with active allocations'])
+                        log(ok ? "drained node #{name} (active allocations remain)" : "failed to drain node #{name}")
                     end
                 end
             RUBY
@@ -208,87 +282,49 @@ module Service
 
         def configure
             msg :info, 'SlurmController::configure'
-            reconfigure_slurmctld = munge_key_generated?
+            topology = controller_topology
+            local = local_controller(topology)
+            primary = topology.first
 
-            #
-            # Hostname Management
-            #
-            desired_hostname = 'slurm-one-controller'
-            current_hostname = Socket.gethostname.split('.').first
+            validate_ha_identity_policy!(topology)
+            configure_controller_identity(topology, local)
+            write_controller_slurm_config(controller_hosts: topology,
+                                          state_save_location: slurm_state_save_location)
 
-            if current_hostname != desired_hostname
-                msg :info, "Hostname is '#{current_hostname}'," \
-                          " changing to '#{desired_hostname}'"
-                bash "hostnamectl set-hostname #{desired_hostname}"
-
-                # Update /etc/hosts
-                ip = controller_ipv4
-
-                hosts_entry = "#{ip}\t#{desired_hostname}"
-
-                unless File.read('/etc/hosts').include?(hosts_entry)
-                    msg :info, "Adding '#{hosts_entry}' to /etc/hosts"
-                    File.open('/etc/hosts', 'a') { |f| f.puts hosts_entry }
-                end
-            end
-
-            write_controller_slurm_config
-
-            #
-            # Munge Key Management
-            #
-            if !munge_key_generated?
-                generate_munge_key
-
-                # Restart slurmctld and check
-                msg :info, 'Restarting slurmctld'
-                bash 'systemctl restart slurmctld'
-                bash 'systemctl is-active slurmctld'
-                msg :info, 'slurmctld started successfully'
+            if local[:primary]
+                generate_munge_key unless munge_key_generated?
             else
-                msg :info, 'Munge key already generated by ONE,' \
-                          ' ensuring services are running.'
-
-                # Check if slurmctld is running, restart if not
-                begin
-                    bash 'systemctl is-active slurmctld'
-                    msg :info, 'slurmctld is active.'
-                rescue StandardError
-                    msg :warn, 'slurmctld is not running,' \
-                              ' attempting to restart.'
-                    bash 'systemctl restart slurmctld'
-                    bash 'systemctl is-active slurmctld'
-                    msg :info, 'slurmctld started successfully'
-                end
+                key, = wait_for_primary_coordination(primary)
+                install_munge_key(key)
             end
 
-            apply_slurmctld_config if reconfigure_slurmctld
+            msg :info, 'Restarting slurmctld with authoritative controller topology'
+            bash 'systemctl restart slurmctld'
+            bash 'systemctl is-active slurmctld'
 
-            # Configure identity (local slapd or external client) and publish
-            # LDAP_URL / LDAP_DOMAIN to OneGate
             ldap_result = configure_controller_ldap
-            case ldap_result
-            when :clear
-                clear_ldap_onegate
-            when String
-                publish_ldap_onegate(ldap_result) unless ldap_result.empty?
+
+            if local[:primary]
+                case ldap_result
+                when :clear
+                    clear_ldap_onegate
+                when String
+                    publish_ldap_onegate(ldap_result) unless ldap_result.empty?
+                end
+                publish_coordination(topology)
             end
 
-            # Publish coordination data (incl. READY=YES) so workers can
-            # self-register via OneGate
-            publish_coordination
-
-            # Start the periodic reconciler that removes scaled-down workers
             enable_node_reconciler
-
             msg :info, 'Configuration completed successfully'
         end
 
-        def publish_coordination
+        def publish_coordination(topology)
             with_retries(msg: 'Attempting to update VM data in OneGate...') do
-                msg :info, 'Publishing Slurm coordination data to OneGate'
+                msg :info, 'Publishing authoritative Slurm coordination data to OneGate'
+                endpoints = topology.map { |item| "#{item[:ip]}:6817" }.join(',')
                 onegate_vm_update [
                     "SLURM_MUNGE_KEY=#{munge_key_base64}",
+                    "SLURM_CONTROLLER_ENDPOINTS=#{endpoints}",
                     'READY=YES'
                 ]
             end
@@ -322,7 +358,6 @@ module Service
 
         def bootstrap
             msg :info, 'SlurmController::bootstrap'
-            # No bootstrap actions defined for the controller yet.
             msg :info, 'Bootstrap completed successfully'
         end
 
