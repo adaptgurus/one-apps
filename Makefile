@@ -59,6 +59,14 @@ packer-service_SlurmWorker: packer-ubuntu2604 $(DIR_EXPORT)/service_SlurmWorker.
 packer-service_SlurmWorker.aarch64: packer-ubuntu2604.aarch64 $(DIR_EXPORT)/service_SlurmWorker.aarch64.qcow2
 	@$(INFO) "Packer service_SlurmWorker.aarch64 done"
 
+packer-service_SlurmAccounting: PKR_VAR_build_ssh_password := $(shell openssl rand -hex 24)
+packer-service_SlurmAccounting: packer-ubuntu2604 $(DIR_EXPORT)/service_SlurmAccounting.qcow2
+	@$(INFO) "Packer service_SlurmAccounting done"
+
+packer-service_SlurmAccounting.aarch64: PKR_VAR_build_ssh_password := $(shell openssl rand -hex 24)
+packer-service_SlurmAccounting.aarch64: packer-ubuntu2604.aarch64 $(DIR_EXPORT)/service_SlurmAccounting.aarch64.qcow2
+	@$(INFO) "Packer service_SlurmAccounting.aarch64 done"
+
 # airgapped version
 packer-service_OneKEa: PKR_VAR_airgapped := YES
 packer-service_OneKEa: packer-ubuntu2204oneke $(DIR_EXPORT)/service_OneKEa.qcow2 $(DIR_EXPORT)/service_OneKE_storage.qcow2
