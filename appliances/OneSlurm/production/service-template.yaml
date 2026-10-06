@@ -1,0 +1,78 @@
+---
+name: LayerSentry OneSlurm Production
+version: 1.0.0
+opennebula_template:
+  name: LayerSentry-OneSlurm-Production
+  deployment: straight
+  description: >-
+    Production-oriented OneSlurm profile with two native Slurm controllers,
+    shared controller state, configless workers and optional external SlurmDBD
+    accounting database.
+  roles:
+    - name: controller
+      cardinality: 2
+      min_vms: 2
+      max_vms: 2
+      vm_template_contents: |
+        NIC = [
+          NAME = "NIC0",
+          NETWORK_ID = "$Service" ]
+        ONEAPP_SLURM_HA_ENABLE = "YES"
+        ONEAPP_SLURM_STATE_SAVE_LOCATION = "/var/lib/oneslurm/state"
+        ONEAPP_SLURM_GPU_AUTODETECT = "$ONEAPP_SLURM_GPU_AUTODETECT"
+        ONEAPP_SLURM_RESERVED_MEMORY_MB = "$ONEAPP_SLURM_RESERVED_MEMORY_MB"
+        ONEAPP_SLURM_ACCOUNTING_ENABLE = "$ONEAPP_SLURM_ACCOUNTING_ENABLE"
+        ONEAPP_SLURM_ACCOUNTING_DB_HOST = "$ONEAPP_SLURM_ACCOUNTING_DB_HOST"
+        ONEAPP_SLURM_ACCOUNTING_DB_PORT = "$ONEAPP_SLURM_ACCOUNTING_DB_PORT"
+        ONEAPP_SLURM_ACCOUNTING_DB_NAME = "$ONEAPP_SLURM_ACCOUNTING_DB_NAME"
+        ONEAPP_SLURM_ACCOUNTING_DB_USER = "$ONEAPP_SLURM_ACCOUNTING_DB_USER"
+        ONEAPP_SLURM_ACCOUNTING_DB_PASSWORD = "$ONEAPP_SLURM_ACCOUNTING_DB_PASSWORD"
+        ONEAPP_LDAP_ENABLE = "NO"
+        ONEAPP_LDAP_DOMAIN = "$ONEAPP_LDAP_DOMAIN"
+        ONEAPP_LDAP_URL = "$ONEAPP_LDAP_URL"
+        ONEAPP_LDAP_BIND_USER = "$ONEAPP_LDAP_BIND_USER"
+        ONEAPP_LDAP_BIND_PASSWORD = "$ONEAPP_LDAP_BIND_PASSWORD"
+        ONEAPP_SLURM_INFINIBAND_ENABLE = "$ONEAPP_SLURM_INFINIBAND_ENABLE"
+        ONEAPP_SLURM_NFS_HOME = "$ONEAPP_SLURM_NFS_HOME"
+        ONEAPP_SLURM_NFS_SCRATCH = "$ONEAPP_SLURM_NFS_SCRATCH"
+        ONEAPP_SLURM_NFS_STATE = "$ONEAPP_SLURM_NFS_STATE"
+      elasticity_policies: []
+      scheduled_policies: []
+    - name: worker
+      parents: [controller]
+      cardinality: 1
+      min_vms: 0
+      cooldown: 60
+      vm_template_contents: |
+        NIC = [
+          NAME = "NIC0",
+          NETWORK_ID = "$Service" ]
+        ONEAPP_SLURM_GPU_AUTODETECT = "$ONEAPP_SLURM_GPU_AUTODETECT"
+        ONEAPP_SLURM_RESERVED_MEMORY_MB = "$ONEAPP_SLURM_RESERVED_MEMORY_MB"
+        ONEAPP_SLURM_INFINIBAND_ENABLE = "$ONEAPP_SLURM_INFINIBAND_ENABLE"
+        ONEAPP_SLURM_IPOIB_SUBNET = "$ONEAPP_SLURM_IPOIB_SUBNET"
+        ONEAPP_SLURM_NFS_HOME = "$ONEAPP_SLURM_NFS_HOME"
+        ONEAPP_SLURM_NFS_SCRATCH = "$ONEAPP_SLURM_NFS_SCRATCH"
+      elasticity_policies: []
+      scheduled_policies: []
+  networks:
+    Service: "M|network|Service||id:"
+  user_inputs:
+    ONEAPP_SLURM_NFS_STATE: "M|text|Dedicated NFSv4 export for shared Slurm controller state (host:/export)||"
+    ONEAPP_SLURM_NFS_HOME: "O|text|NFSv4 export for persistent /home (host:/export)||"
+    ONEAPP_SLURM_NFS_SCRATCH: "O|text|NFSv4 export for /scratch (host:/export)||"
+    ONEAPP_SLURM_RESERVED_MEMORY_MB: "O|number|Memory reserved for node OS/services (MiB)||512"
+    ONEAPP_SLURM_GPU_AUTODETECT: "O|list|GPU discovery backend|nvidia,nvml,off|nvidia"
+    ONEAPP_SLURM_INFINIBAND_ENABLE: "O|boolean|Enable InfiniBand on workers||NO"
+    ONEAPP_SLURM_IPOIB_SUBNET: "O|text|IPoIB subnet when InfiniBand is enabled||"
+    ONEAPP_SLURM_ACCOUNTING_ENABLE: "O|boolean|Enable external SlurmDBD accounting||YES"
+    ONEAPP_SLURM_ACCOUNTING_DB_HOST: "M|text|MariaDB/MySQL accounting endpoint||"
+    ONEAPP_SLURM_ACCOUNTING_DB_PORT: "O|number|Accounting database port||3306"
+    ONEAPP_SLURM_ACCOUNTING_DB_NAME: "O|text|Accounting database name||slurm_acct_db"
+    ONEAPP_SLURM_ACCOUNTING_DB_USER: "O|text|Accounting database user||slurm"
+    ONEAPP_SLURM_ACCOUNTING_DB_PASSWORD: "M|password|Accounting database password||"
+    ONEAPP_LDAP_DOMAIN: "O|text|External LDAP/AD search domain/base||slurm.local"
+    ONEAPP_LDAP_URL: "O|text|External LDAP/LDAPS URL||"
+    ONEAPP_LDAP_BIND_USER: "O|text|External LDAP bind user||"
+    ONEAPP_LDAP_BIND_PASSWORD: "O|password|External LDAP bind password||"
+  ready_status_gate: true
