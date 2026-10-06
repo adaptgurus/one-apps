@@ -327,10 +327,27 @@ module Service
         end
 
         def configure_cluster_munge(records, self_record)
+            configured_key = ONEAPP_SLURM_MUNGE_KEY_BASE64.to_s.strip
+            unless configured_key.empty?
+                return if munge_key_generated? && munge_key_base64 == configured_key
+
+                install_munge_key(configured_key)
+                FileUtils.touch(OneSlurm::Munge::MUNGE_KEY_FLAG)
+                return
+            end
+
             primary = records.first
 
             if self_record[:vmid] == primary[:vmid]
                 generate_munge_key unless munge_key_generated?
+                # Publish only the bootstrap secret, not READY, so backups can
+                # obtain the same key before the primary finishes configuring.
+                with_retries(msg: 'Publishing primary controller MUNGE bootstrap data') do
+                    onegate_vm_update [
+                        "SLURM_MUNGE_KEY=#{munge_key_base64}",
+                        "SLURM_CONTROLLER_NAME=#{self_record[:name]}"
+                    ]
+                end
                 return
             end
 
@@ -411,13 +428,17 @@ module Service
 
         def publish_coordination
             controller_name = Socket.gethostname.split('.').first
+            data = [
+                "SLURM_CONTROLLER_NAME=#{controller_name}",
+                'READY=YES'
+            ]
+            if ONEAPP_SLURM_MUNGE_KEY_BASE64.to_s.strip.empty?
+                data.unshift("SLURM_MUNGE_KEY=#{munge_key_base64}")
+            end
+
             with_retries(msg: 'Attempting to update VM data in OneGate...') do
                 msg :info, 'Publishing Slurm coordination data to OneGate'
-                onegate_vm_update [
-                    "SLURM_MUNGE_KEY=#{munge_key_base64}",
-                    "SLURM_CONTROLLER_NAME=#{controller_name}",
-                    'READY=YES'
-                ]
+                onegate_vm_update data
             end
             msg :info, 'Successfully published Slurm coordination data to OneGate'
         end
@@ -429,12 +450,8 @@ module Service
                 bash "onegate vm update --data LDAP_DOMAIN=#{ONEAPP_LDAP_DOMAIN}"
                 admin_user = ONEAPP_LDAP_ADMIN_USER.to_s.strip
                 bash "onegate vm update --data LDAP_ADMIN_USER=#{admin_user}" unless admin_user.empty?
-                bind_user = ONEAPP_LDAP_BIND_USER.to_s.strip
-                unless bind_user.empty?
-                    bash "onegate vm update --data LDAP_BIND_USER=#{bind_user}"
-                    bind_password = ONEAPP_LDAP_BIND_PASSWORD.to_s
-                    bash "onegate vm update --data LDAP_BIND_PASSWORD=#{bind_password}" unless bind_password.empty?
-                end
+                # Bind credentials are role-local secrets and are intentionally
+                # not copied into generic OneGate VM metadata.
             end
             msg :info, 'Successfully updated OneGate with LDAP metadata'
         end
