@@ -1,0 +1,6 @@
+NAME = "LayerSentry-OneSlurm-Controllers"
+
+ROLE = [
+  NAME = "controller",
+  POLICY = "ANTI_AFFINED"
+]
