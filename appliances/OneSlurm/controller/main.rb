@@ -16,6 +16,7 @@ require_relative '../common/onegate'
 require_relative '../common/ldap'
 require_relative '../common/munge'
 require_relative '../common/slurm'
+require_relative '../common/accounting'
 require_relative '../common/infiniband'
 require_relative 'config'
 
@@ -26,13 +27,14 @@ module Service
         include OneSlurm::Ldap
         include OneSlurm::Munge
         include OneSlurm::Slurm
+        include OneSlurm::Accounting
         include OneSlurm::Infiniband
 
         DEPENDS_ON = []
 
         def install
             msg :info, 'SlurmController::install'
-            bash 'apt update && apt install munge libmunge-dev slurmctld slurm-client slurm-wlm-basic-plugins ldap-utils sssd sssd-ldap libnss-sss libpam-sss nfs-common -y'
+            bash 'apt update && apt install munge libmunge-dev slurmctld slurmdbd slurm-client slurm-wlm-basic-plugins mariadb-client ldap-utils sssd sssd-ldap libnss-sss libpam-sss nfs-common -y'
             install_infiniband_packages
 
             # Install-time config remains compatible with the single-controller
@@ -288,8 +290,10 @@ module Service
 
             validate_ha_identity_policy!(topology)
             configure_controller_identity(topology, local)
+            accounting = slurm_accounting_config(topology)
             write_controller_slurm_config(controller_hosts: topology,
-                                          state_save_location: slurm_state_save_location)
+                                          state_save_location: slurm_state_save_location,
+                                          accounting_config: accounting)
 
             if local[:primary]
                 generate_munge_key unless munge_key_generated?
@@ -297,6 +301,9 @@ module Service
                 key, = wait_for_primary_coordination(primary)
                 install_munge_key(key)
             end
+
+            write_slurmdbd_config(topology)
+            enable_slurmdbd
 
             msg :info, 'Restarting slurmctld with authoritative controller topology'
             bash 'systemctl restart slurmctld'
@@ -311,6 +318,7 @@ module Service
                 when String
                     publish_ldap_onegate(ldap_result) unless ldap_result.empty?
                 end
+                ensure_accounting_cluster
                 publish_coordination(topology)
             end
 
