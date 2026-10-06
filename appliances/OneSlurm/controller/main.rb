@@ -366,15 +366,37 @@ module Service
             FileUtils.touch(OneSlurm::Munge::MUNGE_KEY_FLAG)
         end
 
-        def accounting_host
-            return '' unless truthy?(ONEAPP_SLURM_ACCOUNTING_ENABLE)
+        def accounting_endpoints
+            return ['', ''] unless truthy?(ONEAPP_SLURM_ACCOUNTING_ENABLE)
 
-            host = ONEAPP_SLURM_ACCOUNTING_HOST.to_s.strip
-            if host.empty?
-                raise 'FATAL: ONEAPP_SLURM_ACCOUNTING_ENABLE requires ONEAPP_SLURM_ACCOUNTING_HOST'
+            explicit_primary = ONEAPP_SLURM_ACCOUNTING_HOST.to_s.strip
+            explicit_backup = ONEAPP_SLURM_ACCOUNTING_BACKUP_HOST.to_s.strip
+            return [explicit_primary, explicit_backup] unless explicit_primary.empty?
+
+            with_retries(attempts: 20, delay: 10,
+                         msg: 'Waiting for SlurmDBD accounting role') do
+                vms = optional_role_vms_show('accounting')
+                raise 'Accounting role is not present or has no VMs yet' if vms.empty?
+
+                ready = vms.filter_map do |vm|
+                    user_template = vm.dig('VM', 'USER_TEMPLATE') || {}
+                    next unless user_template['READY'] == 'YES'
+
+                    ip = vm_nic_ipv4(
+                        vm,
+                        preferred_network: ENV['ONEAPP_SLURM_SERVICE_NETWORK'].to_s
+                    )
+                    next if ip.empty?
+
+                    [vm.dig('VM', 'ID').to_i, ip]
+                end.sort_by(&:first)
+
+                raise 'No READY SlurmDBD endpoints are available yet' if ready.empty?
+
+                primary = ready[0][1]
+                backup = ready.length > 1 ? ready[1][1] : ''
+                [primary, backup]
             end
-
-            host
         end
 
         def configure
@@ -384,13 +406,18 @@ module Service
             self_record = configure_controller_identity(records)
             validate_shared_controller_state!(records)
 
+            accounting_primary, accounting_backup = accounting_endpoints
+
             write_controller_slurm_config(
                 controller_hosts: records.map { |record| record[:name] },
                 state_save_location: ONEAPP_SLURM_STATE_SAVE_LOCATION,
                 cluster_name: ONEAPP_SLURM_CLUSTER_NAME,
                 max_node_count: ONEAPP_SLURM_MAX_NODE_COUNT,
-                accounting_host: accounting_host,
+                accounting_host: accounting_primary,
+                accounting_backup_host: accounting_backup,
                 accounting_port: ONEAPP_SLURM_ACCOUNTING_PORT,
+                accounting_tres: ONEAPP_SLURM_ACCOUNTING_TRES,
+                accounting_enforce: ONEAPP_SLURM_ACCOUNTING_ENFORCE,
                 constrain_cores: truthy?(ONEAPP_SLURM_CONSTRAIN_CORES),
                 constrain_ram: truthy?(ONEAPP_SLURM_CONSTRAIN_RAM),
                 constrain_swap: truthy?(ONEAPP_SLURM_CONSTRAIN_SWAP),
@@ -405,7 +432,7 @@ module Service
             apply_slurmctld_config
 
             if records.length > 1 && ONEAPP_LDAP_ENABLE
-                msg :warn, 'Local LDAP is enabled with multiple controllers; production HA should use a qualified external redundant directory'
+                raise 'FATAL: Multi-controller OneSlurm cannot use the non-replicated local LDAP profile; configure an external redundant directory'
             end
 
             # Configure identity (local slapd or external client) and publish
