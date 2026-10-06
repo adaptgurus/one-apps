@@ -27,6 +27,8 @@ module OneSlurm
                                           accounting_host: '',
                                           accounting_backup_host: '',
                                           accounting_port: '',
+                                          accounting_tres: '',
+                                          accounting_enforce: '',
                                           constrain_cores: true,
                                           constrain_ram: true,
                                           constrain_swap: true,
@@ -53,6 +55,8 @@ module OneSlurm
                     AccountingStorageHost=#{accounting_host.to_s.strip}
                     #{accounting_backup_host.to_s.strip.empty? ? '' : "AccountingStorageBackupHost=#{accounting_backup_host.to_s.strip}"}
                     #{accounting_port.to_s.strip.empty? ? '' : "AccountingStoragePort=#{accounting_port.to_s.strip}"}
+                    #{accounting_tres.to_s.strip.empty? ? '' : "AccountingStorageTRES=#{accounting_tres.to_s.strip}"}
+                    #{accounting_enforce.to_s.strip.empty? ? '' : "AccountingStorageEnforce=#{accounting_enforce.to_s.strip}"}
                     JobAcctGatherType=jobacct_gather/cgroup
                     JobAcctGatherFrequency=30
                 CONF
