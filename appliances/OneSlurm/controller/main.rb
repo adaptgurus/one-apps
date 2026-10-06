@@ -387,6 +387,8 @@ module Service
             write_controller_slurm_config(
                 controller_hosts: records.map { |record| record[:name] },
                 state_save_location: ONEAPP_SLURM_STATE_SAVE_LOCATION,
+                cluster_name: ONEAPP_SLURM_CLUSTER_NAME,
+                max_node_count: ONEAPP_SLURM_MAX_NODE_COUNT,
                 accounting_host: accounting_host,
                 accounting_port: ONEAPP_SLURM_ACCOUNTING_PORT,
                 constrain_cores: truthy?(ONEAPP_SLURM_CONSTRAIN_CORES),
