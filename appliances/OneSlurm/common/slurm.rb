@@ -50,7 +50,8 @@ module OneSlurm
         # controller_hosts is an ordered array of hashes containing :name and,
         # optionally, :ip. The first entry is the native primary controller.
         def write_controller_slurm_config(controller_hosts: nil,
-                                          state_save_location: nil)
+                                          state_save_location: nil,
+                                          accounting_config: '')
             controller_hosts ||= [{ name: LEGACY_CONTROLLER_NAME }]
             controller_hosts = Array(controller_hosts)
             raise 'FATAL: At least one Slurm controller is required' if controller_hosts.empty?
@@ -93,6 +94,7 @@ module OneSlurm
                 SelectType=select/cons_tres
                 GresTypes=gpu
                 TaskPlugin=task/cgroup,task/affinity
+                #{accounting_config}
 
                 SlurmUser=slurm
                 StateSaveLocation=#{state_save_location}
