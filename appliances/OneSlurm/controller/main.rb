@@ -51,6 +51,7 @@ module Service
             # Bake the scale-down node reconciler (script + systemd units) into
             # the image; the timer is enabled at configure time.
             install_node_reconciler
+            install_scale_in_preflight
 
             msg :info, 'Installation completed successfully'
         end
@@ -64,6 +65,48 @@ module Service
         # Writes the reconciler script and systemd service/timer units. The
         # reconciler removes Slurm dynamic nodes whose worker VM is no longer
         # part of the OneFlow service (scale-down / deletion).
+        def install_scale_in_preflight
+            msg :info, 'Installing OneSlurm scale-in preflight'
+
+            script = <<~'BASH'
+                #!/usr/bin/env bash
+                set -euo pipefail
+
+                NODE="${1:-}"
+                if [[ -z "$NODE" || ! "$NODE" =~ ^[A-Za-z0-9._-]+$ ]]; then
+                    echo "usage: oneslurm-scale-in-preflight <node>" >&2
+                    exit 64
+                fi
+
+                if ! scontrol show node "$NODE" >/dev/null 2>&1; then
+                    echo "UNKNOWN: Slurm node '$NODE' does not exist" >&2
+                    exit 69
+                fi
+
+                # New work must stop before the final busy check to avoid a
+                # race between admission and VM termination.
+                scontrol update NodeName="$NODE" State=DRAIN Reason="LayerSentry scale-in preflight"
+
+                ACTIVE=$(squeue -h -w "$NODE" -t RUNNING,COMPLETING,CONFIGURING -o '%i' || true)
+                if [[ -n "$ACTIVE" ]]; then
+                    echo "BUSY: node '$NODE' still owns active jobs: $ACTIVE" >&2
+                    exit 75
+                fi
+
+                # Re-read authoritative Slurm state after drain.
+                STATE=$(scontrol -o show node "$NODE" | sed -n 's/.* State=\([^ ]*\).*/\1/p')
+                if [[ -z "$STATE" ]]; then
+                    echo "UNKNOWN: could not read final state for '$NODE'" >&2
+                    exit 69
+                fi
+
+                echo "SAFE: node=$NODE state=$STATE"
+            BASH
+
+            file '/usr/local/sbin/oneslurm-scale-in-preflight', script,
+                 mode: 'u=rwx,go=rx', overwrite: true
+        end
+
         def install_node_reconciler
             msg :info, 'Installing OneSlurm node reconciler'
 
