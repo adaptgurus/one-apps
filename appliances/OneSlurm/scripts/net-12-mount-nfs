@@ -75,6 +75,7 @@ case "${2:-configure}" in
     configure|reconfigure|force)
         mount_nfs_export ONEAPP_SLURM_NFS_HOME /home || _exit_result=1
         mount_nfs_export ONEAPP_SLURM_NFS_SCRATCH /scratch || _exit_result=1
+        mount_nfs_export ONEAPP_SLURM_NFS_STATE /var/lib/oneslurm/state || _exit_result=1
         ;;
     *)
         echo "NFS: Unknown action: ${2:-}" >&2
