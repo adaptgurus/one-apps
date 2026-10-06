@@ -80,6 +80,19 @@ def role_vms_show(name)
     end
 end
 
+def optional_role_vms_show(name)
+    onegate_service = onegate_service_show
+    roles = onegate_service.dig('SERVICE', 'roles') || []
+    role = roles.find { |item| item['name'] == name }
+    return [] if role.nil?
+
+    nodes = role['nodes'] || []
+    nodes.filter_map do |node|
+        vmid = node.dig('vm_info', 'VM', 'ID')
+        vmid.nil? ? nil : onegate_vm_show(vmid)
+    end
+end
+
 def role_vm_show(name) # Shows the first one..
     onegate_service = onegate_service_show
 
