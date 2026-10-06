@@ -11,6 +11,7 @@ require 'open3'
 require 'rbconfig'
 require 'fileutils'
 require 'base64'
+require 'shellwords'
 
 require_relative '../common/onegate'
 require_relative '../common/ldap'
@@ -206,66 +207,147 @@ module Service
             bash 'systemctl enable --now oneslurm-reconcile.timer'
         end
 
+        def truthy?(value)
+            %w[1 true yes on].include?(value.to_s.strip.downcase)
+        end
+
+        def current_vm_id
+            vm = onegate_vm_show
+            id = vm.dig('VM', 'ID').to_s
+            raise 'FATAL: Could not determine current controller VM ID from OneGate' if id.empty?
+
+            id
+        end
+
+        def controller_records
+            vms = role_vms_show('controller')
+            raise 'FATAL: No controller VMs found in OneGate service' if vms.empty?
+
+            multi = vms.length > 1
+            preferred_network = ENV['ONEAPP_SLURM_SERVICE_NETWORK'].to_s
+
+            vms.map do |vm|
+                vmid = vm.dig('VM', 'ID').to_s
+                raise 'FATAL: Controller VM is missing ID' if vmid.empty?
+
+                ip = vm_nic_ipv4(vm, preferred_network: preferred_network)
+                raise "FATAL: Controller VM #{vmid} has no usable IPv4 address" if ip.empty?
+
+                {
+                    vmid: vmid,
+                    name: multi ? "slurm-one-controller-#{vmid}" : 'slurm-one-controller',
+                    ip: ip,
+                    vm: vm
+                }
+            end.sort_by { |record| record[:vmid].to_i }
+        end
+
+        def configure_controller_identity(records)
+            vmid = current_vm_id
+            self_record = records.find { |record| record[:vmid] == vmid }
+            raise "FATAL: Current VM #{vmid} is not present in controller role" if self_record.nil?
+
+            desired_hostname = self_record[:name]
+            current_hostname = Socket.gethostname.split('.').first
+            if current_hostname != desired_hostname
+                msg :info, "Hostname is '#{current_hostname}', changing to '#{desired_hostname}'"
+                bash "hostnamectl set-hostname #{Shellwords.escape(desired_hostname)}"
+            end
+
+            hosts = File.read('/etc/hosts')
+            File.open('/etc/hosts', 'a') do |file_handle|
+                records.each do |record|
+                    entry = "#{record[:ip]}\t#{record[:name]}"
+                    next if hosts.include?(entry)
+
+                    msg :info, "Adding '#{entry}' to /etc/hosts"
+                    file_handle.puts entry
+                end
+            end
+
+            self_record
+        end
+
+        def validate_shared_controller_state!(records)
+            state_dir = ONEAPP_SLURM_STATE_SAVE_LOCATION.to_s.strip
+            raise 'FATAL: ONEAPP_SLURM_STATE_SAVE_LOCATION must not be empty' if state_dir.empty?
+
+            return if records.length == 1
+
+            FileUtils.mkdir_p(state_dir)
+            escaped = Shellwords.escape(state_dir)
+            begin
+                bash "mountpoint -q #{escaped}"
+            rescue StandardError
+                raise "FATAL: Multi-controller OneSlurm requires #{state_dir} to be a dedicated shared mount"
+            end
+        end
+
+        def configure_cluster_munge(records, self_record)
+            primary = records.first
+
+            if self_record[:vmid] == primary[:vmid]
+                generate_munge_key unless munge_key_generated?
+                return
+            end
+
+            key = with_retries(attempts: 20, delay: 10,
+                               msg: 'Waiting for primary controller MUNGE key') do
+                primary_vm = onegate_vm_show(primary[:vmid])
+                value = primary_vm.dig('VM', 'USER_TEMPLATE', 'SLURM_MUNGE_KEY').to_s
+                raise 'Primary controller has not published its MUNGE key yet' if value.empty?
+
+                value
+            end
+
+            return if munge_key_generated? && munge_key_base64 == key
+
+            install_munge_key(key)
+            FileUtils.touch(OneSlurm::Munge::MUNGE_KEY_FLAG)
+        end
+
+        def accounting_host
+            return '' unless truthy?(ONEAPP_SLURM_ACCOUNTING_ENABLE)
+
+            host = ONEAPP_SLURM_ACCOUNTING_HOST.to_s.strip
+            if host.empty?
+                raise 'FATAL: ONEAPP_SLURM_ACCOUNTING_ENABLE requires ONEAPP_SLURM_ACCOUNTING_HOST'
+            end
+
+            host
+        end
+
         def configure
             msg :info, 'SlurmController::configure'
-            reconfigure_slurmctld = munge_key_generated?
 
-            #
-            # Hostname Management
-            #
-            desired_hostname = 'slurm-one-controller'
-            current_hostname = Socket.gethostname.split('.').first
+            records = controller_records
+            self_record = configure_controller_identity(records)
+            validate_shared_controller_state!(records)
 
-            if current_hostname != desired_hostname
-                msg :info, "Hostname is '#{current_hostname}'," \
-                          " changing to '#{desired_hostname}'"
-                bash "hostnamectl set-hostname #{desired_hostname}"
+            write_controller_slurm_config(
+                controller_hosts: records.map { |record| record[:name] },
+                state_save_location: ONEAPP_SLURM_STATE_SAVE_LOCATION,
+                accounting_host: accounting_host,
+                accounting_port: ONEAPP_SLURM_ACCOUNTING_PORT,
+                constrain_cores: truthy?(ONEAPP_SLURM_CONSTRAIN_CORES),
+                constrain_ram: truthy?(ONEAPP_SLURM_CONSTRAIN_RAM),
+                constrain_swap: truthy?(ONEAPP_SLURM_CONSTRAIN_SWAP),
+                constrain_devices: truthy?(ONEAPP_SLURM_CONSTRAIN_DEVICES)
+            )
 
-                # Update /etc/hosts
-                ip = controller_ipv4
+            configure_cluster_munge(records, self_record)
 
-                hosts_entry = "#{ip}\t#{desired_hostname}"
+            msg :info, 'Ensuring slurmctld is running with the current cluster configuration'
+            bash 'systemctl restart slurmctld'
+            bash 'systemctl is-active slurmctld'
+            apply_slurmctld_config
 
-                unless File.read('/etc/hosts').include?(hosts_entry)
-                    msg :info, "Adding '#{hosts_entry}' to /etc/hosts"
-                    File.open('/etc/hosts', 'a') { |f| f.puts hosts_entry }
-                end
+            if records.length > 1 && ONEAPP_LDAP_ENABLE
+                msg :warn, 'Local LDAP is enabled with multiple controllers; production HA should use a qualified external redundant directory'
             end
-
-            write_controller_slurm_config
-
-            #
-            # Munge Key Management
-            #
-            if !munge_key_generated?
-                generate_munge_key
-
-                # Restart slurmctld and check
-                msg :info, 'Restarting slurmctld'
-                bash 'systemctl restart slurmctld'
-                bash 'systemctl is-active slurmctld'
-                msg :info, 'slurmctld started successfully'
-            else
-                msg :info, 'Munge key already generated by ONE,' \
-                          ' ensuring services are running.'
-
-                # Check if slurmctld is running, restart if not
-                begin
-                    bash 'systemctl is-active slurmctld'
-                    msg :info, 'slurmctld is active.'
-                rescue StandardError
-                    msg :warn, 'slurmctld is not running,' \
-                              ' attempting to restart.'
-                    bash 'systemctl restart slurmctld'
-                    bash 'systemctl is-active slurmctld'
-                    msg :info, 'slurmctld started successfully'
-                end
-            end
-
-            apply_slurmctld_config if reconfigure_slurmctld
 
             # Configure identity (local slapd or external client) and publish
-            # LDAP_URL / LDAP_DOMAIN to OneGate
+            # LDAP_URL / LDAP_DOMAIN to OneGate.
             ldap_result = configure_controller_ldap
             case ldap_result
             when :clear
@@ -274,21 +356,23 @@ module Service
                 publish_ldap_onegate(ldap_result) unless ldap_result.empty?
             end
 
-            # Publish coordination data (incl. READY=YES) so workers can
-            # self-register via OneGate
+            # Publish coordination data so workers can discover all READY
+            # controllers and verify they share one MUNGE key.
             publish_coordination
 
-            # Start the periodic reconciler that removes scaled-down workers
+            # Start the periodic reconciler that removes scaled-down workers.
             enable_node_reconciler
 
             msg :info, 'Configuration completed successfully'
         end
 
         def publish_coordination
+            controller_name = Socket.gethostname.split('.').first
             with_retries(msg: 'Attempting to update VM data in OneGate...') do
                 msg :info, 'Publishing Slurm coordination data to OneGate'
                 onegate_vm_update [
                     "SLURM_MUNGE_KEY=#{munge_key_base64}",
+                    "SLURM_CONTROLLER_NAME=#{controller_name}",
                     'READY=YES'
                 ]
             end
