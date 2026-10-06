@@ -8,9 +8,16 @@ module OneSlurm
     module Slurm
 
         def controller_ipv4
-            Socket.ip_address_list
-                  .find { |a| a.ipv4? && !a.ipv4_loopback? }
-                  .ip_address
+            %w[ONEAPP_SLURM_SERVICE_IP ETH0_IP].each do |key|
+                configured = ENV[key].to_s.strip
+                return configured unless configured.empty? || configured == '0.0.0.0'
+            end
+
+            address = Socket.ip_address_list
+                            .find { |a| a.ipv4? && !a.ipv4_loopback? }
+            raise 'FATAL: No non-loopback IPv4 address found for Slurm controller' if address.nil?
+
+            address.ip_address
         end
 
         def write_controller_slurm_config(controller_hosts: ['slurm-one-controller'],
