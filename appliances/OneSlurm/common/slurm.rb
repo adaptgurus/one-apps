@@ -22,6 +22,8 @@ module OneSlurm
 
         def write_controller_slurm_config(controller_hosts: ['slurm-one-controller'],
                                           state_save_location: '/var/spool/slurmctld',
+                                          cluster_name: 'one',
+                                          max_node_count: 100,
                                           accounting_host: '',
                                           accounting_port: '',
                                           constrain_cores: true,
@@ -34,6 +36,14 @@ module OneSlurm
             controller_lines = controller_hosts.map { |host| "SlurmctldHost=#{host}" }.join("\n")
             state_save_location = state_save_location.to_s.strip
             raise 'FATAL: StateSaveLocation must not be empty' if state_save_location.empty?
+
+            cluster_name = cluster_name.to_s.strip
+            unless cluster_name.match?(/\A[A-Za-z0-9._-]+\z/)
+                raise 'FATAL: ClusterName must contain only letters, digits, dot, underscore or dash'
+            end
+
+            max_node_count = Integer(max_node_count)
+            raise 'FATAL: MaxNodeCount must be positive' unless max_node_count.positive?
 
             accounting_config = ''
             unless accounting_host.to_s.strip.empty?
@@ -53,12 +63,13 @@ module OneSlurm
 
             # Create slurm.conf
             slurm_conf = <<~CONF
-                ClusterName=one
+                ClusterName=#{cluster_name}
                 #{controller_lines}
                 AuthType=auth/munge
                 ProctrackType=proctrack/cgroup
                 SchedulerType=sched/backfill
                 SelectType=select/cons_tres
+                SelectTypeParameters=CR_Core_Memory
                 GresTypes=gpu
                 TaskPlugin=task/cgroup,task/affinity
 
@@ -73,7 +84,7 @@ module OneSlurm
                 #{infiniband_config}
                 #{accounting_config}
 
-                MaxNodeCount=100
+                MaxNodeCount=#{max_node_count}
 
                 Nodeset=one Feature=one
 
@@ -121,12 +132,22 @@ module OneSlurm
             msg :warn, "Could not apply slurmctld reconfigure: #{e.message}"
         end
 
-        def write_slurmd_unit(hostname, controller_hosts: ['slurm-one-controller'])
+        def write_slurmd_unit(hostname, controller_hosts: ['slurm-one-controller'],
+                              system_reserved_memory_mb: 0)
             controller_hosts = Array(controller_hosts).map(&:to_s).map(&:strip).reject(&:empty?).uniq
             raise 'FATAL: At least one Slurm controller host is required' if controller_hosts.empty?
 
+            reserve = Integer(system_reserved_memory_mb)
+            raise 'FATAL: System reserved memory cannot be negative' if reserve.negative?
+
+            total_memory = real_memory_mb
+            if reserve >= total_memory
+                raise "FATAL: System reserved memory #{reserve} MiB must be less than total memory #{total_memory} MiB"
+            end
+
             conf_server = controller_hosts.map { |host| "#{host}:6817" }.join(',')
-            conf = "CPUs=#{cpu_count} RealMemory=#{real_memory_mb} Feature=one"
+            usable_memory = total_memory - reserve
+            conf = "CPUs=#{cpu_count} RealMemory=#{usable_memory} Feature=one"
             gpus = gpu_count
             conf += " Gres=gpu:#{gpus}" if gpus > 0
             slurmd_unit = <<~UNIT
