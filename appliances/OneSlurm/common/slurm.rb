@@ -13,7 +13,32 @@ module OneSlurm
                   .ip_address
         end
 
-        def write_controller_slurm_config
+        def write_controller_slurm_config(controller_hosts: ['slurm-one-controller'],
+                                          state_save_location: '/var/spool/slurmctld',
+                                          accounting_host: '',
+                                          accounting_port: '',
+                                          constrain_cores: true,
+                                          constrain_ram: true,
+                                          constrain_swap: true,
+                                          constrain_devices: true)
+            controller_hosts = Array(controller_hosts).map(&:to_s).map(&:strip).reject(&:empty?).uniq
+            raise 'FATAL: At least one Slurm controller host is required' if controller_hosts.empty?
+
+            controller_lines = controller_hosts.map { |host| "SlurmctldHost=#{host}" }.join("\n")
+            state_save_location = state_save_location.to_s.strip
+            raise 'FATAL: StateSaveLocation must not be empty' if state_save_location.empty?
+
+            accounting_config = ''
+            unless accounting_host.to_s.strip.empty?
+                accounting_config = <<~CONF
+                    AccountingStorageType=accounting_storage/slurmdbd
+                    AccountingStorageHost=#{accounting_host.to_s.strip}
+                    #{accounting_port.to_s.strip.empty? ? '' : "AccountingStoragePort=#{accounting_port.to_s.strip}"}
+                    JobAcctGatherType=jobacct_gather/cgroup
+                    JobAcctGatherFrequency=30
+                CONF
+            end
+
             infiniband_config = slurm_infiniband_enabled? ? <<~CONF : ''
                 MpiDefault=pmix
                 PropagateResourceLimitsExcept=MEMLOCK
@@ -22,7 +47,7 @@ module OneSlurm
             # Create slurm.conf
             slurm_conf = <<~CONF
                 ClusterName=one
-                SlurmctldHost=slurm-one-controller
+                #{controller_lines}
                 AuthType=auth/munge
                 ProctrackType=proctrack/cgroup
                 SchedulerType=sched/backfill
@@ -31,7 +56,7 @@ module OneSlurm
                 TaskPlugin=task/cgroup,task/affinity
 
                 SlurmUser=slurm
-                StateSaveLocation=/var/spool/slurmctld
+                StateSaveLocation=#{state_save_location}
                 SlurmdSpoolDir=/var/spool/slurmd
 
                 SlurmctldPidFile=/var/run/slurm/slurmctld.pid
@@ -39,6 +64,7 @@ module OneSlurm
 
                 SlurmctldParameters=enable_configless
                 #{infiniband_config}
+                #{accounting_config}
 
                 MaxNodeCount=100
 
@@ -56,17 +82,20 @@ module OneSlurm
 
             cgroup_conf = <<~CONF
                 CgroupAutomount=yes
-                ConstrainDevices=yes
+                ConstrainCores=#{constrain_cores ? 'yes' : 'no'}
+                ConstrainRAMSpace=#{constrain_ram ? 'yes' : 'no'}
+                ConstrainSwapSpace=#{constrain_swap ? 'yes' : 'no'}
+                ConstrainDevices=#{constrain_devices ? 'yes' : 'no'}
             CONF
             File.write('/etc/slurm/cgroup.conf', cgroup_conf)
 
             # Create directories and set permissions
             FileUtils.mkdir_p('/var/spool/slurmd')
-            FileUtils.mkdir_p('/var/spool/slurmctld')
+            FileUtils.mkdir_p(state_save_location)
             FileUtils.chown_R('slurm', 'slurm', '/var/spool/slurmd')
-            FileUtils.chown_R('slurm', 'slurm', '/var/spool/slurmctld')
+            FileUtils.chown_R('slurm', 'slurm', state_save_location)
             FileUtils.chmod(0700, '/var/spool/slurmd')
-            FileUtils.chmod(0700, '/var/spool/slurmctld')
+            FileUtils.chmod(0700, state_save_location)
         end
 
         def slurm_infiniband_enabled?
@@ -85,7 +114,11 @@ module OneSlurm
             msg :warn, "Could not apply slurmctld reconfigure: #{e.message}"
         end
 
-        def write_slurmd_unit(hostname)
+        def write_slurmd_unit(hostname, controller_hosts: ['slurm-one-controller'])
+            controller_hosts = Array(controller_hosts).map(&:to_s).map(&:strip).reject(&:empty?).uniq
+            raise 'FATAL: At least one Slurm controller host is required' if controller_hosts.empty?
+
+            conf_server = controller_hosts.map { |host| "#{host}:6817" }.join(',')
             conf = "CPUs=#{cpu_count} RealMemory=#{real_memory_mb} Feature=one"
             gpus = gpu_count
             conf += " Gres=gpu:#{gpus}" if gpus > 0
