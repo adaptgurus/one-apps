@@ -1,0 +1,13 @@
+NAME = "OneSlurm Production Placement"
+
+ROLE = [
+    NAME = "controller",
+    POLICY = "ANTI_AFFINED"
+]
+
+ROLE = [
+    NAME = "accounting",
+    POLICY = "ANTI_AFFINED"
+]
+
+ANTI_AFFINED = "controller, accounting"

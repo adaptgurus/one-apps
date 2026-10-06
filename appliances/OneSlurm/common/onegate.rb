@@ -32,10 +32,23 @@ def onegate_vm_update(data, vmid = '')
     bash "onegate vm update #{vmid} --data \"#{Array(data).join('\n')}\""
 end
 
-def vm_nic_ipv4(vm)
+def vm_nic_ipv4(vm, preferred_network: '')
     nics = vm.dig('VM', 'TEMPLATE', 'NIC')
     nics = [nics] if nics.is_a?(Hash)
-    Array(nics).each do |nic|
+    nics = Array(nics)
+
+    preferred_network = preferred_network.to_s.strip
+    unless preferred_network.empty?
+        preferred = nics.find do |nic|
+            nic['NETWORK'].to_s == preferred_network ||
+                nic['NETWORK_ID'].to_s == preferred_network ||
+                nic['NAME'].to_s == preferred_network
+        end
+        ip = preferred && preferred['IP'].to_s
+        return ip unless ip.to_s.empty?
+    end
+
+    nics.each do |nic|
         ip = nic['IP'].to_s
         return ip unless ip.empty?
     end
@@ -64,6 +77,19 @@ def role_vms_show(name)
 
     vmids.each_with_object [] do |vmid, acc|
         acc << onegate_vm_show(vmid)
+    end
+end
+
+def optional_role_vms_show(name)
+    onegate_service = onegate_service_show
+    roles = onegate_service.dig('SERVICE', 'roles') || []
+    role = roles.find { |item| item['name'] == name }
+    return [] if role.nil?
+
+    nodes = role['nodes'] || []
+    nodes.filter_map do |node|
+        vmid = node.dig('vm_info', 'VM', 'ID')
+        vmid.nil? ? nil : onegate_vm_show(vmid)
     end
 end
 

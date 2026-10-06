@@ -11,6 +11,7 @@ require 'open3'
 require 'rbconfig'
 require 'fileutils'
 require 'base64'
+require 'shellwords'
 
 require_relative '../common/onegate'
 require_relative '../common/ldap'
@@ -50,6 +51,7 @@ module Service
             # Bake the scale-down node reconciler (script + systemd units) into
             # the image; the timer is enabled at configure time.
             install_node_reconciler
+            install_scale_in_preflight
 
             msg :info, 'Installation completed successfully'
         end
@@ -63,6 +65,48 @@ module Service
         # Writes the reconciler script and systemd service/timer units. The
         # reconciler removes Slurm dynamic nodes whose worker VM is no longer
         # part of the OneFlow service (scale-down / deletion).
+        def install_scale_in_preflight
+            msg :info, 'Installing OneSlurm scale-in preflight'
+
+            script = <<~'BASH'
+                #!/usr/bin/env bash
+                set -euo pipefail
+
+                NODE="${1:-}"
+                if [[ -z "$NODE" || ! "$NODE" =~ ^[A-Za-z0-9._-]+$ ]]; then
+                    echo "usage: oneslurm-scale-in-preflight <node>" >&2
+                    exit 64
+                fi
+
+                if ! scontrol show node "$NODE" >/dev/null 2>&1; then
+                    echo "UNKNOWN: Slurm node '$NODE' does not exist" >&2
+                    exit 69
+                fi
+
+                # New work must stop before the final busy check to avoid a
+                # race between admission and VM termination.
+                scontrol update NodeName="$NODE" State=DRAIN Reason="LayerSentry scale-in preflight"
+
+                ACTIVE=$(squeue -h -w "$NODE" -t RUNNING,COMPLETING,CONFIGURING -o '%i' || true)
+                if [[ -n "$ACTIVE" ]]; then
+                    echo "BUSY: node '$NODE' still owns active jobs: $ACTIVE" >&2
+                    exit 75
+                fi
+
+                # Re-read authoritative Slurm state after drain.
+                STATE=$(scontrol -o show node "$NODE" | sed -n 's/.* State=\([^ ]*\).*/\1/p')
+                if [[ -z "$STATE" ]]; then
+                    echo "UNKNOWN: could not read final state for '$NODE'" >&2
+                    exit 69
+                fi
+
+                echo "SAFE: node=$NODE state=$STATE"
+            BASH
+
+            file '/usr/local/sbin/oneslurm-scale-in-preflight', script,
+                 mode: 'u=rwx,go=rx', overwrite: true
+        end
+
         def install_node_reconciler
             msg :info, 'Installing OneSlurm node reconciler'
 
@@ -206,66 +250,193 @@ module Service
             bash 'systemctl enable --now oneslurm-reconcile.timer'
         end
 
+        def truthy?(value)
+            %w[1 true yes on].include?(value.to_s.strip.downcase)
+        end
+
+        def current_vm_id
+            vm = onegate_vm_show
+            id = vm.dig('VM', 'ID').to_s
+            raise 'FATAL: Could not determine current controller VM ID from OneGate' if id.empty?
+
+            id
+        end
+
+        def controller_records
+            vms = role_vms_show('controller')
+            raise 'FATAL: No controller VMs found in OneGate service' if vms.empty?
+
+            multi = vms.length > 1
+            preferred_network = ENV['ONEAPP_SLURM_SERVICE_NETWORK'].to_s
+
+            vms.map do |vm|
+                vmid = vm.dig('VM', 'ID').to_s
+                raise 'FATAL: Controller VM is missing ID' if vmid.empty?
+
+                ip = vm_nic_ipv4(vm, preferred_network: preferred_network)
+                raise "FATAL: Controller VM #{vmid} has no usable IPv4 address" if ip.empty?
+
+                {
+                    vmid: vmid,
+                    name: multi ? "slurm-one-controller-#{vmid}" : 'slurm-one-controller',
+                    ip: ip,
+                    vm: vm
+                }
+            end.sort_by { |record| record[:vmid].to_i }
+        end
+
+        def configure_controller_identity(records)
+            vmid = current_vm_id
+            self_record = records.find { |record| record[:vmid] == vmid }
+            raise "FATAL: Current VM #{vmid} is not present in controller role" if self_record.nil?
+
+            desired_hostname = self_record[:name]
+            current_hostname = Socket.gethostname.split('.').first
+            if current_hostname != desired_hostname
+                msg :info, "Hostname is '#{current_hostname}', changing to '#{desired_hostname}'"
+                bash "hostnamectl set-hostname #{Shellwords.escape(desired_hostname)}"
+            end
+
+            hosts = File.read('/etc/hosts')
+            File.open('/etc/hosts', 'a') do |file_handle|
+                records.each do |record|
+                    entry = "#{record[:ip]}\t#{record[:name]}"
+                    next if hosts.include?(entry)
+
+                    msg :info, "Adding '#{entry}' to /etc/hosts"
+                    file_handle.puts entry
+                end
+            end
+
+            self_record
+        end
+
+        def validate_shared_controller_state!(records)
+            state_dir = ONEAPP_SLURM_STATE_SAVE_LOCATION.to_s.strip
+            raise 'FATAL: ONEAPP_SLURM_STATE_SAVE_LOCATION must not be empty' if state_dir.empty?
+
+            return if records.length == 1
+
+            FileUtils.mkdir_p(state_dir)
+            escaped = Shellwords.escape(state_dir)
+            begin
+                bash "mountpoint -q #{escaped}"
+            rescue StandardError
+                raise "FATAL: Multi-controller OneSlurm requires #{state_dir} to be a dedicated shared mount"
+            end
+        end
+
+        def configure_cluster_munge(records, self_record)
+            configured_key = ONEAPP_SLURM_MUNGE_KEY_BASE64.to_s.strip
+            unless configured_key.empty?
+                return if munge_key_generated? && munge_key_base64 == configured_key
+
+                install_munge_key(configured_key)
+                FileUtils.touch(OneSlurm::Munge::MUNGE_KEY_FLAG)
+                return
+            end
+
+            primary = records.first
+
+            if self_record[:vmid] == primary[:vmid]
+                generate_munge_key unless munge_key_generated?
+                # Publish only the bootstrap secret, not READY, so backups can
+                # obtain the same key before the primary finishes configuring.
+                with_retries(msg: 'Publishing primary controller MUNGE bootstrap data') do
+                    onegate_vm_update [
+                        "SLURM_MUNGE_KEY=#{munge_key_base64}",
+                        "SLURM_CONTROLLER_NAME=#{self_record[:name]}"
+                    ]
+                end
+                return
+            end
+
+            key = with_retries(attempts: 20, delay: 10,
+                               msg: 'Waiting for primary controller MUNGE key') do
+                primary_vm = onegate_vm_show(primary[:vmid])
+                value = primary_vm.dig('VM', 'USER_TEMPLATE', 'SLURM_MUNGE_KEY').to_s
+                raise 'Primary controller has not published its MUNGE key yet' if value.empty?
+
+                value
+            end
+
+            return if munge_key_generated? && munge_key_base64 == key
+
+            install_munge_key(key)
+            FileUtils.touch(OneSlurm::Munge::MUNGE_KEY_FLAG)
+        end
+
+        def accounting_endpoints
+            return ['', ''] unless truthy?(ONEAPP_SLURM_ACCOUNTING_ENABLE)
+
+            explicit_primary = ONEAPP_SLURM_ACCOUNTING_HOST.to_s.strip
+            explicit_backup = ONEAPP_SLURM_ACCOUNTING_BACKUP_HOST.to_s.strip
+            return [explicit_primary, explicit_backup] unless explicit_primary.empty?
+
+            with_retries(attempts: 20, delay: 10,
+                         msg: 'Waiting for SlurmDBD accounting role') do
+                vms = optional_role_vms_show('accounting')
+                raise 'Accounting role is not present or has no VMs yet' if vms.empty?
+
+                ready = vms.filter_map do |vm|
+                    user_template = vm.dig('VM', 'USER_TEMPLATE') || {}
+                    next unless user_template['READY'] == 'YES'
+
+                    ip = vm_nic_ipv4(
+                        vm,
+                        preferred_network: ENV['ONEAPP_SLURM_SERVICE_NETWORK'].to_s
+                    )
+                    next if ip.empty?
+
+                    [vm.dig('VM', 'ID').to_i, ip]
+                end.sort_by(&:first)
+
+                raise 'No READY SlurmDBD endpoints are available yet' if ready.empty?
+
+                primary = ready[0][1]
+                backup = ready.length > 1 ? ready[1][1] : ''
+                [primary, backup]
+            end
+        end
+
         def configure
             msg :info, 'SlurmController::configure'
-            reconfigure_slurmctld = munge_key_generated?
 
-            #
-            # Hostname Management
-            #
-            desired_hostname = 'slurm-one-controller'
-            current_hostname = Socket.gethostname.split('.').first
+            records = controller_records
+            self_record = configure_controller_identity(records)
+            validate_shared_controller_state!(records)
 
-            if current_hostname != desired_hostname
-                msg :info, "Hostname is '#{current_hostname}'," \
-                          " changing to '#{desired_hostname}'"
-                bash "hostnamectl set-hostname #{desired_hostname}"
+            accounting_primary, accounting_backup = accounting_endpoints
 
-                # Update /etc/hosts
-                ip = controller_ipv4
+            write_controller_slurm_config(
+                controller_hosts: records.map { |record| record[:name] },
+                state_save_location: ONEAPP_SLURM_STATE_SAVE_LOCATION,
+                cluster_name: ONEAPP_SLURM_CLUSTER_NAME,
+                max_node_count: ONEAPP_SLURM_MAX_NODE_COUNT,
+                accounting_host: accounting_primary,
+                accounting_backup_host: accounting_backup,
+                accounting_port: ONEAPP_SLURM_ACCOUNTING_PORT,
+                accounting_tres: ONEAPP_SLURM_ACCOUNTING_TRES,
+                accounting_enforce: ONEAPP_SLURM_ACCOUNTING_ENFORCE,
+                constrain_cores: truthy?(ONEAPP_SLURM_CONSTRAIN_CORES),
+                constrain_ram: truthy?(ONEAPP_SLURM_CONSTRAIN_RAM),
+                constrain_swap: truthy?(ONEAPP_SLURM_CONSTRAIN_SWAP),
+                constrain_devices: truthy?(ONEAPP_SLURM_CONSTRAIN_DEVICES)
+            )
 
-                hosts_entry = "#{ip}\t#{desired_hostname}"
+            configure_cluster_munge(records, self_record)
 
-                unless File.read('/etc/hosts').include?(hosts_entry)
-                    msg :info, "Adding '#{hosts_entry}' to /etc/hosts"
-                    File.open('/etc/hosts', 'a') { |f| f.puts hosts_entry }
-                end
+            msg :info, 'Ensuring slurmctld is running with the current cluster configuration'
+            bash 'systemctl restart slurmctld'
+            bash 'systemctl is-active slurmctld'
+            apply_slurmctld_config
+
+            if records.length > 1 && ONEAPP_LDAP_ENABLE
+                raise 'FATAL: Multi-controller OneSlurm cannot use the non-replicated local LDAP profile; configure an external redundant directory'
             end
-
-            write_controller_slurm_config
-
-            #
-            # Munge Key Management
-            #
-            if !munge_key_generated?
-                generate_munge_key
-
-                # Restart slurmctld and check
-                msg :info, 'Restarting slurmctld'
-                bash 'systemctl restart slurmctld'
-                bash 'systemctl is-active slurmctld'
-                msg :info, 'slurmctld started successfully'
-            else
-                msg :info, 'Munge key already generated by ONE,' \
-                          ' ensuring services are running.'
-
-                # Check if slurmctld is running, restart if not
-                begin
-                    bash 'systemctl is-active slurmctld'
-                    msg :info, 'slurmctld is active.'
-                rescue StandardError
-                    msg :warn, 'slurmctld is not running,' \
-                              ' attempting to restart.'
-                    bash 'systemctl restart slurmctld'
-                    bash 'systemctl is-active slurmctld'
-                    msg :info, 'slurmctld started successfully'
-                end
-            end
-
-            apply_slurmctld_config if reconfigure_slurmctld
 
             # Configure identity (local slapd or external client) and publish
-            # LDAP_URL / LDAP_DOMAIN to OneGate
+            # LDAP_URL / LDAP_DOMAIN to OneGate.
             ldap_result = configure_controller_ldap
             case ldap_result
             when :clear
@@ -274,23 +445,29 @@ module Service
                 publish_ldap_onegate(ldap_result) unless ldap_result.empty?
             end
 
-            # Publish coordination data (incl. READY=YES) so workers can
-            # self-register via OneGate
+            # Publish coordination data so workers can discover all READY
+            # controllers and verify they share one MUNGE key.
             publish_coordination
 
-            # Start the periodic reconciler that removes scaled-down workers
+            # Start the periodic reconciler that removes scaled-down workers.
             enable_node_reconciler
 
             msg :info, 'Configuration completed successfully'
         end
 
         def publish_coordination
+            controller_name = Socket.gethostname.split('.').first
+            data = [
+                "SLURM_CONTROLLER_NAME=#{controller_name}",
+                'READY=YES'
+            ]
+            if ONEAPP_SLURM_MUNGE_KEY_BASE64.to_s.strip.empty?
+                data.unshift("SLURM_MUNGE_KEY=#{munge_key_base64}")
+            end
+
             with_retries(msg: 'Attempting to update VM data in OneGate...') do
                 msg :info, 'Publishing Slurm coordination data to OneGate'
-                onegate_vm_update [
-                    "SLURM_MUNGE_KEY=#{munge_key_base64}",
-                    'READY=YES'
-                ]
+                onegate_vm_update data
             end
             msg :info, 'Successfully published Slurm coordination data to OneGate'
         end
@@ -302,12 +479,8 @@ module Service
                 bash "onegate vm update --data LDAP_DOMAIN=#{ONEAPP_LDAP_DOMAIN}"
                 admin_user = ONEAPP_LDAP_ADMIN_USER.to_s.strip
                 bash "onegate vm update --data LDAP_ADMIN_USER=#{admin_user}" unless admin_user.empty?
-                bind_user = ONEAPP_LDAP_BIND_USER.to_s.strip
-                unless bind_user.empty?
-                    bash "onegate vm update --data LDAP_BIND_USER=#{bind_user}"
-                    bind_password = ONEAPP_LDAP_BIND_PASSWORD.to_s
-                    bash "onegate vm update --data LDAP_BIND_PASSWORD=#{bind_password}" unless bind_password.empty?
-                end
+                # Bind credentials are role-local secrets and are intentionally
+                # not copied into generic OneGate VM metadata.
             end
             msg :info, 'Successfully updated OneGate with LDAP metadata'
         end

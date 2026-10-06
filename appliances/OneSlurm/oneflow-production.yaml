@@ -1,0 +1,106 @@
+---
+name: OneSlurm Production
+deployment: straight
+description: Native Slurm HA production service definition for LayerSentry.
+roles:
+- name: accounting
+  cardinality: 2
+  min_vms: 2
+  vm_template_contents: |
+    NIC = [
+      NAME = "NIC0",
+      NETWORK_ID = "$Service" ]
+    VMGROUP = [
+      VMGROUP_NAME = "$ONEAPP_SLURM_VMGROUP",
+      ROLE = "accounting" ]
+    ONEAPP_SLURM_SERVICE_NETWORK = "$Service"
+    ONEAPP_SLURM_MUNGE_KEY_BASE64 = "$ONEAPP_SLURM_MUNGE_KEY_BASE64"
+    ONEAPP_SLURM_CLUSTER_NAME = "$ONEAPP_SLURM_CLUSTER_NAME"
+    ONEAPP_SLURM_DB_HOST = "$ONEAPP_SLURM_DB_HOST"
+    ONEAPP_SLURM_DB_BACKUP_HOST = "$ONEAPP_SLURM_DB_BACKUP_HOST"
+    ONEAPP_SLURM_DB_PORT = "$ONEAPP_SLURM_DB_PORT"
+    ONEAPP_SLURM_DB_NAME = "$ONEAPP_SLURM_DB_NAME"
+    ONEAPP_SLURM_DB_USER = "$ONEAPP_SLURM_DB_USER"
+    ONEAPP_SLURM_DB_PASSWORD = "$ONEAPP_SLURM_DB_PASSWORD"
+    ONEAPP_LDAP_URL = "$ONEAPP_LDAP_URL"
+    ONEAPP_LDAP_DOMAIN = "$ONEAPP_LDAP_DOMAIN"
+    ONEAPP_LDAP_BIND_USER = "$ONEAPP_LDAP_BIND_USER"
+    ONEAPP_LDAP_BIND_PASSWORD = "$ONEAPP_LDAP_BIND_PASSWORD"
+  elasticity_policies: []
+  scheduled_policies: []
+- name: controller
+  cardinality: 2
+  min_vms: 2
+  vm_template_contents: |
+    NIC = [
+      NAME = "NIC0",
+      NETWORK_ID = "$Service" ]
+    VMGROUP = [
+      VMGROUP_NAME = "$ONEAPP_SLURM_VMGROUP",
+      ROLE = "controller" ]
+    ONEAPP_LDAP_ENABLE = "NO"
+    ONEAPP_LDAP_DOMAIN = "$ONEAPP_LDAP_DOMAIN"
+    ONEAPP_LDAP_URL = "$ONEAPP_LDAP_URL"
+    ONEAPP_LDAP_BIND_USER = "$ONEAPP_LDAP_BIND_USER"
+    ONEAPP_LDAP_BIND_PASSWORD = "$ONEAPP_LDAP_BIND_PASSWORD"
+    ONEAPP_SLURM_SERVICE_NETWORK = "$Service"
+    ONEAPP_SLURM_MUNGE_KEY_BASE64 = "$ONEAPP_SLURM_MUNGE_KEY_BASE64"
+    ONEAPP_SLURM_CLUSTER_NAME = "$ONEAPP_SLURM_CLUSTER_NAME"
+    ONEAPP_SLURM_MAX_NODE_COUNT = "$ONEAPP_SLURM_MAX_NODE_COUNT"
+    ONEAPP_SLURM_ACCOUNTING_ENABLE = "YES"
+    ONEAPP_SLURM_ACCOUNTING_PORT = "$ONEAPP_SLURM_DBD_PORT"
+    ONEAPP_SLURM_ACCOUNTING_TRES = "$ONEAPP_SLURM_ACCOUNTING_TRES"
+    ONEAPP_SLURM_ACCOUNTING_ENFORCE = "$ONEAPP_SLURM_ACCOUNTING_ENFORCE"
+    ONEAPP_SLURM_NFS_HOME = "$ONEAPP_SLURM_NFS_HOME"
+    ONEAPP_SLURM_NFS_SCRATCH = "$ONEAPP_SLURM_NFS_SCRATCH"
+    ONEAPP_SLURM_NFS_STATE = "$ONEAPP_SLURM_NFS_STATE"
+    ONEAPP_SLURM_STATE_SAVE_LOCATION = "/var/lib/oneslurm/state"
+  elasticity_policies: []
+  scheduled_policies: []
+- name: worker
+  parents: [controller]
+  cardinality: 1
+  min_vms: 1
+  cooldown: 30
+  vm_template_contents: |
+    NIC = [
+      NAME = "NIC0",
+      NETWORK_ID = "$Service" ]
+    ONEAPP_SLURM_SERVICE_NETWORK = "$Service"
+    ONEAPP_SLURM_MUNGE_KEY_BASE64 = "$ONEAPP_SLURM_MUNGE_KEY_BASE64"
+    ONEAPP_LDAP_BIND_USER = "$ONEAPP_LDAP_BIND_USER"
+    ONEAPP_LDAP_BIND_PASSWORD = "$ONEAPP_LDAP_BIND_PASSWORD"
+    ONEAPP_SLURM_INFINIBAND_ENABLE = "$ONEAPP_SLURM_INFINIBAND_ENABLE"
+    ONEAPP_SLURM_IPOIB_SUBNET = "$ONEAPP_SLURM_IPOIB_SUBNET"
+    ONEAPP_SLURM_SYSTEM_RESERVED_MEMORY_MB = "$ONEAPP_SLURM_SYSTEM_RESERVED_MEMORY_MB"
+    ONEAPP_SLURM_NFS_HOME = "$ONEAPP_SLURM_NFS_HOME"
+    ONEAPP_SLURM_NFS_SCRATCH = "$ONEAPP_SLURM_NFS_SCRATCH"
+  elasticity_policies: []
+  scheduled_policies: []
+networks:
+  Service: "M|network|Service||id:"
+user_inputs:
+  ONEAPP_SLURM_VMGROUP: "M|text|Native OpenNebula VM Group name for controller/accounting anti-affinity||"
+  ONEAPP_SLURM_MUNGE_KEY_BASE64: "M|password|Pre-generated base64 MUNGE key injected by LayerSentry||"
+  ONEAPP_SLURM_CLUSTER_NAME: "M|text|Slurm cluster name||one"
+  ONEAPP_SLURM_MAX_NODE_COUNT: "O|number|Maximum Slurm worker count||100"
+  ONEAPP_SLURM_SYSTEM_RESERVED_MEMORY_MB: "O|number|Worker memory reserved for the OS and agents (MiB)||2048"
+  ONEAPP_SLURM_DBD_PORT: "O|number|SlurmDBD port||6819"
+  ONEAPP_SLURM_DB_HOST: "M|text|Primary MariaDB/MySQL endpoint for SlurmDBD||"
+  ONEAPP_SLURM_DB_BACKUP_HOST: "O|text|Backup database endpoint; omit for clustered DB VIP/DNS||"
+  ONEAPP_SLURM_DB_PORT: "O|number|Database port||3306"
+  ONEAPP_SLURM_DB_NAME: "O|text|Accounting database||slurm_acct_db"
+  ONEAPP_SLURM_DB_USER: "M|text|Accounting database user||slurm"
+  ONEAPP_SLURM_DB_PASSWORD: "M|password|Accounting database password||"
+  ONEAPP_SLURM_ACCOUNTING_TRES: "O|text|Additional TRES to account||gres/gpu"
+  ONEAPP_SLURM_ACCOUNTING_ENFORCE: "O|text|Optional Slurm accounting enforcement policy||"
+  ONEAPP_LDAP_URL: "O|text|External LDAP/LDAPS URL||"
+  ONEAPP_LDAP_DOMAIN: "O|text|LDAP domain/base-DN source||slurm.local"
+  ONEAPP_LDAP_BIND_USER: "O|text|LDAP bind user||"
+  ONEAPP_LDAP_BIND_PASSWORD: "O|password|LDAP bind password||"
+  ONEAPP_SLURM_INFINIBAND_ENABLE: "O|boolean|Enable InfiniBand on workers||NO"
+  ONEAPP_SLURM_IPOIB_SUBNET: "O|text|IPoIB subnet when enabled||"
+  ONEAPP_SLURM_NFS_HOME: "M|text|Persistent NFSv4 export for /home (host:/export)||"
+  ONEAPP_SLURM_NFS_SCRATCH: "O|text|NFSv4 export for /scratch (host:/export)||"
+  ONEAPP_SLURM_NFS_STATE: "M|text|Dedicated shared NFSv4 export for Slurm controller state||"
+ready_status_gate: true

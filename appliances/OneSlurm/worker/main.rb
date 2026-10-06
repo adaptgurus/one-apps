@@ -70,27 +70,32 @@ module Service
         def configure
             msg(:info, 'SlurmWorker::configure')
 
-            # Discover the controller and coordination data through OneGate.
-            controller_ip, munge_key_b64, ldap = discover_controller
+            # Discover all READY controllers and shared coordination data through OneGate.
+            controllers, munge_key_b64, ldap = discover_controllers
+            controller_names = controllers.map { |controller| controller['name'] }
 
-            msg(:info, "Controller IP specified: #{controller_ip}")
+            msg(:info, "Slurm controllers: #{controller_names.join(', ')}")
 
-            # Check if the controller is reachable on the slurmctld port, with retries
-            msg(:info, "Checking for controller reachability at #{controller_ip}:6817...")
+            # At least one controller must be reachable. Configless slurmd receives
+            # the full ordered controller set and can fail over natively.
             port_open = false
             5.times do |i|
-                if tcp_port_open?(controller_ip, 6817)
+                reachable = controllers.find do |controller|
+                    tcp_port_open?(controller['ip'], 6817)
+                end
+                if reachable
+                    msg(:info, "Controller reachable at #{reachable['ip']}:6817")
                     port_open = true
                     break
                 end
-                msg(:warn, "Controller not reachable, retrying in 10s (#{i + 1}/5)...")
+                msg(:warn, "No controller reachable, retrying in 10s (#{i + 1}/5)...")
                 sleep 10
             end
 
             unless port_open
-                raise "FATAL: Cannot connect to Slurm controller at #{controller_ip}:6817 after 5 attempts."
+                endpoints = controllers.map { |controller| "#{controller['ip']}:6817" }.join(', ')
+                raise "FATAL: Cannot connect to any Slurm controller (#{endpoints}) after 5 attempts."
             end
-            msg(:info, 'Successfully connected to Slurm controller port.')
 
             # Configure hostname
             if ENV['SET_HOSTNAME'].to_s.empty?
@@ -120,14 +125,12 @@ module Service
 
             hostname = Socket.gethostname.split('.').first
 
-            # Add worker and controller to /etc/hosts
+            # Add worker and every controller to /etc/hosts.
             ip = Socket.ip_address_list
                        .find { |a| a.ipv4? && !a.ipv4_loopback? }
                        .ip_address
-            hosts_entries = [
-                "#{ip}\t#{hostname}",
-                "#{controller_ip}\tslurm-one-controller"
-            ]
+            hosts_entries = ["#{ip}\t#{hostname}"] +
+                            controllers.map { |controller| "#{controller['ip']}\t#{controller['name']}" }
             hosts = File.read('/etc/hosts')
             File.open('/etc/hosts', 'a') do |f|
                 hosts_entries.each do |hosts_entry|
@@ -150,7 +153,11 @@ module Service
             # Wait and start the slurmd service
             sleep 5
             msg(:info, 'Starting slurmd and registering with controller')
-            write_slurmd_unit(hostname)
+            write_slurmd_unit(
+                hostname,
+                controller_hosts: controller_names,
+                system_reserved_memory_mb: ONEAPP_SLURM_SYSTEM_RESERVED_MEMORY_MB
+            )
             msg(:info, 'slurmd started')
 
             # Publish the Slurm node name so the controller reconciler has a
@@ -187,6 +194,12 @@ module Service
                 export SLURM_CONF=/run/slurm/conf/slurm.conf
                 [ -f "$SLURM_CONF" ] || export SLURM_CONF=/etc/slurm/slurm.conf
                 NODE=$(hostname -s)
+                RUNNING=$(timeout 15 squeue -h -w "$NODE" -t RUNNING -o '%i' 2>/dev/null || true)
+                if [ -n "$RUNNING" ]; then
+                    logger -t oneslurm-self-drain "refusing node deletion for $NODE: running jobs: $RUNNING"
+                    timeout 15 scontrol update NodeName="$NODE" State=DRAIN Reason="shutdown attempted with running jobs" 2>/dev/null || true
+                    exit 1
+                fi
                 timeout 15 scontrol update NodeName="$NODE" State=DOWN Reason="oneflow scale-down" 2>/dev/null || true
                 timeout 15 scontrol delete NodeName="$NODE" 2>/dev/null || true
             SCRIPT
@@ -214,38 +227,73 @@ module Service
             bash('systemctl enable --now oneslurm-self-drain.service')
         end
 
-        def discover_controller(retries = 20, seconds = 15)
-            msg(:info, 'Discovering Slurm controller through OneGate')
+        def discover_controllers(retries = 20, seconds = 15)
+            msg(:info, 'Discovering Slurm controllers through OneGate')
 
             retries.downto(0).each do |retry_num|
                 begin
-                    controller_vm = role_vm_show('controller')
-                    user_template = controller_vm.dig('VM', 'USER_TEMPLATE') || {}
+                    controller_vms = role_vms_show('controller')
+                    multi = controller_vms.length > 1
 
-                    ready = user_template['READY'] == 'YES'
-                    ip    = vm_nic_ipv4(controller_vm)
-                    key   = user_template['SLURM_MUNGE_KEY'].to_s
+                    controllers = controller_vms.map do |controller_vm|
+                        user_template = controller_vm.dig('VM', 'USER_TEMPLATE') || {}
+                        vmid = controller_vm.dig('VM', 'ID').to_s
+                        name = user_template['SLURM_CONTROLLER_NAME'].to_s.strip
+                        name = multi ? "slurm-one-controller-#{vmid}" : 'slurm-one-controller' if name.empty?
 
-                    if ready && !ip.empty? && !key.empty?
-                        # The controller is the authority for cluster LDAP and
-                        # publishes its effective config through OneGate. The
-                        # worker consumes only these values and ignores the
-                        # ONEAPP_LDAP_* context OneFlow injects into every role.
-                        ldap = {
-                            'url'           => user_template['LDAP_URL'].to_s,
-                            'domain'        => user_template['LDAP_DOMAIN'].to_s,
-                            'bind_user'     => user_template['LDAP_BIND_USER'].to_s,
-                            'bind_password' => user_template['LDAP_BIND_PASSWORD'].to_s
+                        {
+                            'vmid' => vmid,
+                            'name' => name,
+                            'ip' => vm_nic_ipv4(
+                                controller_vm,
+                                preferred_network: ONEAPP_SLURM_SERVICE_NETWORK
+                            ),
+                            'ready' => user_template['READY'] == 'YES',
+                            'key' => user_template['SLURM_MUNGE_KEY'].to_s,
+                            'ldap' => {
+                                'url' => user_template['LDAP_URL'].to_s,
+                                'domain' => user_template['LDAP_DOMAIN'].to_s,
+                                'bind_user' => ONEAPP_LDAP_BIND_USER.to_s,
+                                'bind_password' => ONEAPP_LDAP_BIND_PASSWORD.to_s
+                            }
                         }
-                        return [ip, key, ldap]
+                    end.sort_by { |controller| controller['vmid'].to_i }
+
+                    configured_key = ONEAPP_SLURM_MUNGE_KEY_BASE64.to_s.strip
+                    ready = controllers.select do |controller|
+                        has_key = !configured_key.empty? || !controller['key'].empty?
+                        controller['ready'] && !controller['ip'].empty? && has_key
                     end
 
-                    msg(:warn, "Controller not ready yet (READY=#{user_template['READY']}), retrying in #{seconds}s...")
+                    unless ready.empty?
+                        published_keys = ready.map { |controller| controller['key'] }
+                                              .reject(&:empty?).uniq
+                        if published_keys.length > 1
+                            raise 'FATAL: READY Slurm controllers published inconsistent MUNGE keys'
+                        end
+                        if !configured_key.empty? && !published_keys.empty? &&
+                           published_keys.first != configured_key
+                            raise 'FATAL: Published MUNGE key conflicts with configured cluster secret'
+                        end
+                        key = configured_key.empty? ? published_keys.first : configured_key
+                        raise 'FATAL: No usable MUNGE key available for worker bootstrap' if key.to_s.empty?
+
+                        endpoints = ready.map do |controller|
+                            { 'vmid' => controller['vmid'],
+                              'name' => controller['name'],
+                              'ip' => controller['ip'] }
+                        end
+                        return [endpoints, key, ready.first['ldap']]
+                    end
+
+                    msg(:warn, "No READY Slurm controller with complete coordination data; retrying in #{seconds}s...")
                 rescue StandardError => e
+                    raise if e.message.start_with?('FATAL:')
+
                     msg(:warn, "OneGate controller discovery failed: #{e.message}. Retrying in #{seconds}s...")
                 end
 
-                raise 'FATAL: Could not discover Slurm controller through OneGate.' if retry_num.zero?
+                raise 'FATAL: Could not discover a READY Slurm controller set through OneGate.' if retry_num.zero?
 
                 sleep seconds
             end
