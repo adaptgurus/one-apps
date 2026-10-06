@@ -37,8 +37,14 @@ module OneSlurm
             raise 'FATAL: At least one Slurm controller host is required' if controller_hosts.empty?
 
             controller_lines = controller_hosts.map { |host| "SlurmctldHost=#{host}" }.join("\n")
-            state_save_location = state_save_location.to_s.strip
-            raise 'FATAL: StateSaveLocation must not be empty' if state_save_location.empty?
+            state_save_location = File.expand_path(state_save_location.to_s.strip)
+            allowed_state_path = state_save_location == '/var/spool/slurmctld' ||
+                                 %w[/var/lib/oneslurm/ /srv/oneslurm/ /mnt/oneslurm/].any? do |prefix|
+                                     state_save_location.start_with?(prefix)
+                                 end
+            unless allowed_state_path
+                raise "FATAL: Unsafe StateSaveLocation '#{state_save_location}'"
+            end
 
             cluster_name = cluster_name.to_s.strip
             unless cluster_name.match?(/\A[A-Za-z0-9._-]+\z/)
