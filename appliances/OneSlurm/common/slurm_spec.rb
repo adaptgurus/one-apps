@@ -98,7 +98,7 @@ RSpec.describe OneSlurm::Slurm do
     end
 
     it 'counts GPU UUID records rather than relying on index arithmetic' do
-        status = instance_double(Process::Status, success?: true)
+        status = double('process-status', success?: true)
         allow(Open3).to receive(:capture3).and_return("GPU-a\nGPU-b\n", '', status)
 
         expect(helper.gpu_count).to eq(2)
