@@ -94,6 +94,7 @@ module Service
             user = ONEAPP_SLURM_DB_USER.to_s.strip
             password = ONEAPP_SLURM_DB_PASSWORD.to_s
             db_name = ONEAPP_SLURM_DB_NAME.to_s.strip
+            archive_dir = File.expand_path(ONEAPP_SLURM_ARCHIVE_DIR.to_s.strip)
 
             raise 'FATAL: ONEAPP_SLURM_DB_HOST is required' if host.empty?
             raise 'FATAL: ONEAPP_SLURM_DB_USER is required' if user.empty?
@@ -101,6 +102,10 @@ module Service
             raise 'FATAL: ONEAPP_SLURM_DB_NAME is required' if db_name.empty?
             if password.include?('#') || password.include?("\n") || password.include?("\r")
                 raise 'FATAL: SlurmDBD database password contains unsupported characters'
+            end
+            unless archive_dir == '/var/lib/slurmdbd' ||
+                   archive_dir.start_with?('/var/lib/slurmdbd/')
+                raise "FATAL: Unsafe SlurmDBD archive path '#{archive_dir}'"
             end
         end
 
@@ -184,9 +189,10 @@ module Service
             FileUtils.chown('slurm', 'slurm', '/etc/slurm/slurmdbd.conf')
             FileUtils.chmod(0o600, '/etc/slurm/slurmdbd.conf')
 
-            FileUtils.mkdir_p(ONEAPP_SLURM_ARCHIVE_DIR)
-            FileUtils.chown_R('slurm', 'slurm', ONEAPP_SLURM_ARCHIVE_DIR)
-            FileUtils.chmod(0o700, ONEAPP_SLURM_ARCHIVE_DIR)
+            archive_dir = File.expand_path(ONEAPP_SLURM_ARCHIVE_DIR.to_s)
+            FileUtils.mkdir_p(archive_dir)
+            FileUtils.chown_R('slurm', 'slurm', archive_dir)
+            FileUtils.chmod(0o700, archive_dir)
         end
 
         def ensure_service
