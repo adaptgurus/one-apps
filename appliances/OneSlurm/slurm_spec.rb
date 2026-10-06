@@ -37,6 +37,8 @@ RSpec.describe OneSlurm::Slurm do
         harness.write_controller_slurm_config(
             controller_hosts: %w[slurm-one-controller-10 slurm-one-controller-11],
             state_save_location: '/var/lib/oneslurm/state',
+            cluster_name: 'prod-ai',
+            max_node_count: 256,
             accounting_host: 'slurmdbd.internal',
             accounting_port: '6819'
         )
@@ -45,6 +47,9 @@ RSpec.describe OneSlurm::Slurm do
         expect(slurm).to include('SlurmctldHost=slurm-one-controller-10')
         expect(slurm).to include('SlurmctldHost=slurm-one-controller-11')
         expect(slurm).to include('StateSaveLocation=/var/lib/oneslurm/state')
+        expect(slurm).to include('ClusterName=prod-ai')
+        expect(slurm).to include('MaxNodeCount=256')
+        expect(slurm).to include('SelectTypeParameters=CR_Core_Memory')
         expect(slurm).to include('AccountingStorageType=accounting_storage/slurmdbd')
         expect(slurm).to include('AccountingStorageHost=slurmdbd.internal')
         expect(slurm).to include('AccountingStoragePort=6819')
@@ -82,11 +87,13 @@ RSpec.describe OneSlurm::Slurm do
 
         harness.write_slurmd_unit(
             'slurm-one-worker-20',
-            controller_hosts: %w[slurm-one-controller-10 slurm-one-controller-11]
+            controller_hosts: %w[slurm-one-controller-10 slurm-one-controller-11],
+            system_reserved_memory_mb: 2048
         )
 
         expect(unit).to include('--conf-server slurm-one-controller-10:6817,slurm-one-controller-11:6817')
         expect(unit).to include('Gres=gpu:2')
+        expect(unit).to include('RealMemory=30720')
     end
 
     it 'rejects an empty controller list' do
